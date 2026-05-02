@@ -41,6 +41,8 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.image }}
             ghcr.io/reefyai/reefy-qr-access:latest
+          provenance: false
+          sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
