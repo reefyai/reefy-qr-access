@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+{% block title %}Users - QR Access{% endblock %}
+{% block content %}
+<div class="header-row">
+    <h1>Users</h1>
+    <button onclick="showAddUser()">+ Add User</button>
+</div>
+
+{% macro source_label(user) -%}
+{%- if user.created_via and user.created_via.startswith('sync:') -%}
+{{ user.created_via[5:]|capitalize }}
+{%- else -%}
+Internal
+{%- endif -%}
+{%- endmacro %}
+
+<div class="table-wrap">
+<table>
+    <thead>
+        <tr>
+            <th>Source</th>
+            <th>Name</th>
+            <th>Email</th>
+            <th>Phone</th>
+            <th>Unit</th>
+            <th>Created</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody id="users-table">
+        {% for user in users %}
+        {% set src = source_label(user) %}
+        <tr id="user-{{ user.id }}"{% if user.is_active == 0 %} class="user-row-inactive"{% endif %}>
+            <td><span class="badge badge-source-{{ src.lower() }}">{{ src }}</span></td>
+            <td>
+                {{ user.full_name }}
+                {% if user.is_active == 0 %}<small style="color:#888">(inactive)</small>{% endif %}
+            </td>
+            <td>{{ user.email or '' }}</td>
+            <td>{{ user.phone_primary or '' }}</td>
+            <td>{{ user.unit_label or user.address or '' }}</td>
+            <td>{{ user.created_at[:10] }}</td>
+            <td class="actions">
+                <button class="btn-sm" onclick="showTokens({{ user.id }}, '{{ user.full_name }}')">QR Codes</button>
+                <button class="btn-sm btn-danger" onclick="deleteUser({{ user.id }}, '{{ user.full_name }}')">Delete</button>
+            </td>
+        </tr>
+        {% endfor %}
+        {% if not users %}
+        <tr><td colspan="7" class="empty">No users yet. Click "+ Add User" to create one.</td></tr>
+        {% endif %}
+    </tbody>
+</table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function showAddUser() {
+    openModal(`
+        <h2>Add User</h2>
+        <div id="add-user-error" class="form-error" style="display:none"></div>
+        <form onsubmit="event.preventDefault(); addUser(this)">
+            <label>Full Name</label>
+            <input type="text" name="full_name" placeholder="John Doe" required autofocus>
+            <label>Email</label>
+            <input type="email" name="email" placeholder="john@example.com" required>
+            <label>Address</label>
+            <input type="text" name="address" placeholder="123 Main St, Apt 4B">
+            <button type="submit">Create User</button>
+        </form>
+    `);
+}
+
+async function addUser(form) {
+    const errEl = document.getElementById('add-user-error');
+    const btn = form.querySelector('button[type="submit"]');
+    errEl.style.display = 'none';
+    btn.disabled = true;
+    btn.textContent = 'Creating...';
+
+    const resetBtn = () => { btn.disabled = false; btn.textContent = 'Create User'; };
+    const showErr = (msg) => { errEl.textContent = msg; errEl.style.display = 'block'; resetBtn(); };
+
+    let res;
+    try {
+        res = await fetch('/api/users', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                full_name: form.full_name.value,
+                email: form.email.value,
+                address: form.address.value,
+            }),
+        });
+    } catch (e) {
+        showErr('Network error, please try again.');
+        return;
+    }
+
+    if (!res.ok) {
+        let msg = 'Failed to create user';
+        try { msg = (await res.json()).error || msg; } catch {}
+        showErr(msg);
+        return;
+    }
+
+    let u;
+    try { u = (await res.json()).user; } catch { showErr('Invalid response'); return; }
+
+    const empty = document.querySelector('.empty');
+    if (empty) empty.closest('tr')?.remove();
+    const row = document.createElement('tr');
+    row.id = `user-${u.id}`;
+    const esc = u.full_name.replace(/'/g, "\\'");
+    row.innerHTML = `
+        <td>${u.full_name}</td>
+        <td>${u.email}</td>
+        <td>${u.address}</td>
+        <td>${u.created_at.substring(0, 10)}</td>
+        <td class="actions">
+            <button class="btn-sm" onclick="showTokens(${u.id}, '${esc}')">QR Codes</button>
+            <button class="btn-sm btn-danger" onclick="deleteUser(${u.id}, '${esc}')">Delete</button>
+        </td>`;
+    document.getElementById('users-table').prepend(row);
+    closeModal();
+}
+
+function buildTokenCards(tokens, userId, name) {
+    const active = tokens.filter(t => t.active);
+    let cards = '';
+    for (const t of active) {
+        cards += `
+            <div class="qr-card">
+                <div class="qr-card-img">
+                    <img src="/api/tokens/${t.id}/qr" alt="QR" class="qr-image">
+                </div>
+                <div class="qr-card-info">
+                    <div class="qr-card-comment">${t.comment}</div>
+                    <div class="qr-card-meta">${t.created_at.substring(0, 10)} &mdash; <span class="token-cell" style="word-break:break-all;">${t.token}</span></div>
+                    <a class="btn btn-sm btn-blue" href="/api/tokens/${t.id}/qr-labeled?name=${encodeURIComponent(name)}&comment=${encodeURIComponent(t.comment)}" download="qr-${name.replace(/\s+/g, '_')}-${t.token.substring(0,8)}.png">Save QR</a>
+                    <button class="btn-sm btn-danger" onclick="revokeToken(${t.id}, ${userId}, '${name}')">Revoke</button>
+                </div>
+            </div>`;
+    }
+    return cards || '<p class="empty">No active QR codes.</p>';
+}
+
+async function showTokens(userId, name) {
+    const res = await fetch(`/api/users/${userId}/tokens`);
+    const data = await res.json();
+    const cards = buildTokenCards(data.tokens, userId, name);
+
+    // If modal already open for this user, just refresh the cards
+    const existing = document.getElementById('qr-cards-container');
+    if (existing && existing.dataset.userId == userId) {
+        existing.innerHTML = cards;
+        return;
+    }
+
+    openModal(`
+        <h2>${name} — QR Codes</h2>
+        <div class="qr-cards" id="qr-cards-container" data-user-id="${userId}">${cards}</div>
+        <div class="qr-add-section">
+            <p class="qr-add-label">Generate a new QR code for this user:</p>
+            <form onsubmit="event.preventDefault(); addToken(${userId}, '${name}', this)" class="qr-add-form">
+                <input type="text" name="comment" placeholder="Reason or note (e.g. new phone, spare key)">
+                <button type="submit">Generate QR Code</button>
+            </form>
+        </div>
+    `);
+}
+
+function revokeToken(tokenId, userId, userName) {
+    confirmAction('Revoke this QR code? It will no longer open any door.', async () => {
+        const res = await api(`/api/tokens/${tokenId}/revoke`, 'POST');
+        if (res.ok) showTokens(userId, userName);
+    });
+}
+
+async function addToken(userId, userName, form) {
+    const comment = form.comment.value;
+    form.comment.value = '';
+
+    const res = await fetch(`/api/users/${userId}/tokens`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({comment}),
+    });
+    if (res.ok) {
+        // Refresh just the cards, keep form intact
+        const tokRes = await fetch(`/api/users/${userId}/tokens`);
+        const data = await tokRes.json();
+        const container = document.getElementById('qr-cards-container');
+        if (container) {
+            container.innerHTML = buildTokenCards(data.tokens, userId, userName);
+        }
+    }
+    return false;
+}
+
+function deleteUser(userId, name) {
+    confirmAction(`Delete user <strong>${name}</strong>? This will revoke all their QR codes.`, async () => {
+        const res = await api(`/api/users/${userId}`, 'DELETE');
+        if (res.ok) document.getElementById(`user-${userId}`).remove();
+    });
+}
+</script>
+{% endblock %}

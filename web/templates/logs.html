@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block title %}Logs - QR Access{% endblock %}
+{% block content %}
+<div class="header-row">
+    <h1>Access Logs</h1>
+    <span class="live-badge" id="live-badge">LIVE</span>
+</div>
+
+<div class="table-wrap">
+<table>
+    <thead>
+        <tr>
+            <th>Time</th>
+            <th>Event</th>
+            <th>User</th>
+            <th>Token</th>
+            <th>Door</th>
+            <th>Video</th>
+        </tr>
+    </thead>
+    <tbody id="logs-table">
+        {% for e in entries %}
+        <tr class="{{ 'log-denied' if e.event == 'ACCESS-DENIED' else '' }} {{ 'log-revoked' if e.token_active == 0 or (e.full_name is none and e.event == 'ACCESS-GRANTED') else '' }}" data-log-id="{{ e.id }}">
+            <td>{{ e.timestamp }} <span class="time-ago" data-ts="{{ e.timestamp }}"></span></td>
+            <td>
+                {% if e.event == 'ACCESS-GRANTED' %}
+                <span class="badge badge-granted">GRANTED</span>
+                {% else %}
+                <span class="badge badge-denied">DENIED</span>
+                {% endif %}
+            </td>
+            <td>
+                {% if e.full_name %}
+                    {{ e.full_name }}
+                    {% if e.token_active == 0 %}<span class="badge badge-revoked">revoked</span>{% endif %}
+                {% else %}
+                    <span class="unknown-user">Unknown</span>
+                {% endif %}
+            </td>
+            <td class="token-cell">{{ e.token[:8] }}...</td>
+            <td>{{ e.door_name }}</td>
+            <td>
+                {% if e.video_path %}
+                <button class="btn-sm" onclick="playVideo('/api/video/{{ e.video_path }}', this)">&#9654; Play</button>
+                {% else %}
+                <span class="no-video">—</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+        {% if not entries %}
+        <tr id="empty-row"><td colspan="6" class="empty">No access events yet.</td></tr>
+        {% endif %}
+    </tbody>
+</table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function playVideo(url, btn) {
+    const check = await fetch(url, {method: 'HEAD'});
+    if (!check.ok) {
+        // Show spinner modal and poll until ready
+        openModal(`
+            <h2>Event Video</h2>
+            <div class="video-loading">
+                <div class="spinner"></div>
+                <p>Recording in progress...</p>
+            </div>
+        `);
+        let pollCount = 0;
+        const poll = setInterval(async () => {
+            pollCount++;
+            const retry = await fetch(url, {method: 'HEAD'});
+            if (retry.ok) {
+                clearInterval(poll);
+                document.getElementById('modal-content').innerHTML = `
+                    <h2>Event Video</h2>
+                    <video controls autoplay class="event-video">
+                        <source src="${url}" type="video/mp4">
+                    </video>
+                `;
+            } else if (pollCount > 15) {
+                clearInterval(poll);
+                document.getElementById('modal-content').innerHTML = `
+                    <h2>Event Video</h2>
+                    <p style="color:#f87171;">Video unavailable — recording may have been interrupted.</p>
+                `;
+            }
+        }, 2000);
+        return;
+    }
+    openModal(`
+        <h2>Event Video</h2>
+        <video controls autoplay class="event-video">
+            <source src="${url}" type="video/mp4">
+        </video>
+    `);
+}
+
+(function() {
+    const table = document.getElementById('logs-table');
+    const badge = document.getElementById('live-badge');
+    const emptyRow = document.getElementById('empty-row');
+
+    const evtSource = new EventSource('/api/logs/stream');
+
+    evtSource.onmessage = function(event) {
+        const e = JSON.parse(event.data);
+        if (emptyRow) emptyRow.remove();
+
+        const tr = document.createElement('tr');
+        tr.dataset.logId = e.id;
+
+        const classes = [];
+        if (e.event === 'ACCESS-DENIED') classes.push('log-denied');
+        if (e.token_active === 0 || (!e.full_name && e.event === 'ACCESS-GRANTED')) {
+            classes.push('log-revoked');
+        }
+        tr.className = classes.join(' ');
+
+        const eventBadge = e.event === 'ACCESS-GRANTED'
+            ? '<span class="badge badge-granted">GRANTED</span>'
+            : '<span class="badge badge-denied">DENIED</span>';
+
+        let userCell;
+        if (e.full_name) {
+            userCell = e.full_name;
+            if (e.token_active === 0) {
+                userCell += ' <span class="badge badge-revoked">revoked</span>';
+            }
+        } else {
+            userCell = '<span class="unknown-user">Unknown</span>';
+        }
+
+        const videoCell = e.video_path
+            ? `<button class="btn-sm" onclick="playVideo('/api/video/${e.video_path}', this)">&#9654; Play</button>`
+            : '<span class="no-video">—</span>';
+
+        tr.innerHTML = `
+            <td>${e.timestamp} <span class="time-ago" data-ts="${e.timestamp}"></span></td>
+            <td>${eventBadge}</td>
+            <td>${userCell}</td>
+            <td class="token-cell">${e.token.substring(0, 8)}...</td>
+            <td>${e.door_name}</td>
+            <td>${videoCell}</td>
+        `;
+
+        table.insertBefore(tr, table.firstChild);
+
+        tr.classList.add('log-new');
+        setTimeout(() => tr.classList.remove('log-new'), 2000);
+    };
+
+    evtSource.onerror = function() {
+        badge.textContent = 'DISCONNECTED';
+        badge.classList.add('badge-disconnected');
+    };
+
+    evtSource.onopen = function() {
+        badge.textContent = 'LIVE';
+        badge.classList.remove('badge-disconnected');
+    };
+})();
+
+function formatAgo(ts) {
+    const d = new Date(ts.replace(' ', 'T') + 'Z');
+    const sec = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (sec < 5) return '(just now)';
+    if (sec < 60) return `(${sec}s ago)`;
+    const min = Math.floor(sec / 60);
+    const s = sec % 60;
+    if (min < 60) return `(${min}m ${s}s ago)`;
+    const hr = Math.floor(min / 60);
+    const m = min % 60;
+    return `(${hr}h ${m}m ago)`;
+}
+
+function updateAgoTimes() {
+    document.querySelectorAll('.time-ago').forEach(el => {
+        const ts = el.dataset.ts;
+        if (ts) el.textContent = formatAgo(ts);
+    });
+}
+updateAgoTimes();
+setInterval(updateAgoTimes, 10000);
+</script>
+{% endblock %}

@@ -1,0 +1,494 @@
+{% extends "base.html" %}
+{% block title %}Settings - QR Access{% endblock %}
+{% block content %}
+<div class="header-row">
+    <h1>Settings</h1>
+</div>
+
+<div class="header-row">
+    <h2>Doors</h2>
+    <button onclick="showAddDoor()">+ Add Door</button>
+</div>
+
+<div id="doors-list">
+    {% for door in doors %}
+    <div class="door-card" id="door-{{ door.id }}">
+        <div class="door-header">
+            <h3>{{ door.name }}</h3>
+            <button class="btn-sm btn-danger" onclick="deleteDoor({{ door.id }}, '{{ door.name }}')">Delete</button>
+        </div>
+        <div class="door-details">
+            <span>Camera: {{ door.camera_uuid or 'Not set' }} <span class="camera-status" id="cam-status-{{ door.name }}"></span></span>
+            <span>Shelly: {{ door.shelly_device_id or 'Not set' }} <button class="btn-sm" onclick="testShelly({{ door.id }})">Test</button> <span id="shelly-status-{{ door.id }}" style="font-size:0.85em;"></span></span>
+        </div>
+    </div>
+    {% endfor %}
+    {% if not doors %}
+    <p class="empty">No doors configured. Scan the network first, then add a door.</p>
+    {% endif %}
+</div>
+
+<div class="header-row" style="margin-top:2rem">
+    <h2>Available Devices</h2>
+    <button onclick="scanNetwork()" id="scan-btn">Scan Network</button>
+</div>
+<div class="two-col">
+    <div class="panel">
+        <h3>Cameras (ONVIF)</h3>
+        <div id="cameras-list">
+            {% if cameras %}
+            {% for cam in cameras %}
+            <div class="device-card" data-uuid="{{ cam.uuid }}" data-ip="{{ cam.ip }}" data-xaddr="{{ cam.xaddr }}" data-rtsp='{{ cam.rtsp_urls | tojson }}'>
+                <strong>{{ cam.name or 'Unknown' }}</strong> ({{ cam.hardware }})
+                <div class="device-detail">{{ cam.ip }} &mdash; {{ cam.uuid }}</div>
+                <div class="rtsp-urls" id="rtsp-{{ cam.uuid }}">
+                    {% if cam.rtsp_urls %}
+                    {% for s in cam.rtsp_urls %}
+                    <div class="device-detail" style="font-size:0.8em;color:#aaa;">{{ s.profile }}: <code>{{ s.url }}</code></div>
+                    {% endfor %}
+                    {% else %}
+                    <button class="btn-sm" onclick="fetchRtsp(this, '{{ cam.ip }}', '{{ cam.xaddr }}', '{{ cam.uuid }}')" style="margin-top:4px;">Fetch RTSP</button>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+            {% else %}
+            <p class="empty">No cameras discovered. Click "Scan Network".</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="panel">
+        <h3>Shelly Devices (mDNS)</h3>
+        <div id="shellys-list">
+            {% if shellys %}
+            {% for s in shellys %}
+            <div class="device-card">
+                <strong>{{ s.device_id }}</strong>
+                <div class="device-detail">{{ s.ip }}</div>
+            </div>
+            {% endfor %}
+            {% else %}
+            <p class="empty">No Shelly devices discovered. Click "Scan Network".</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<div class="header-row" style="margin-top:2rem">
+    <h2>Integrations</h2>
+</div>
+<div class="panel">
+    <h3>Buildium</h3>
+    <p class="device-detail" style="margin-bottom:0.8rem;">
+        Pull residents (owners + tenants) from your Buildium account so you
+        don't have to add them by hand. Re-syncing is safe: existing users are
+        updated, new ones added, and people removed from Buildium are marked
+        inactive (their QR codes are revoked, but the historical record stays).
+    </p>
+
+    <form id="buildium-form" onsubmit="event.preventDefault(); buildiumSave()">
+        <label>Base URL</label>
+        <select name="base_url" id="buildium-base-url">
+            <option value="https://api.buildium.com/v1">Production (api.buildium.com)</option>
+            <option value="https://apisandbox.buildium.com/v1">Sandbox (apisandbox.buildium.com)</option>
+        </select>
+
+        <label>Client ID</label>
+        <input type="text" name="client_id" id="buildium-client-id"
+               placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off">
+
+        <label>Secret</label>
+        <input type="password" name="client_secret" id="buildium-client-secret"
+               placeholder="(leave blank to keep saved secret)" autocomplete="off">
+
+        <div style="display:flex;gap:0.5rem;margin-top:0.6rem;">
+            <button type="button" onclick="buildiumTest()">Test connection</button>
+            <button type="submit">Save &amp; Sync</button>
+            <button type="button" id="buildium-sync-btn" onclick="buildiumSync()">Sync now</button>
+        </div>
+
+        <div id="buildium-msg" style="margin-top:0.6rem;font-size:0.9em;"></div>
+    </form>
+
+    <div id="buildium-status" style="margin-top:1rem;font-size:0.9em;color:#aaa;">
+        Loading status...
+    </div>
+</div>
+
+<div style="margin-top:2rem;color:#888;font-size:0.85em;">
+    qr-access <span data-testid="app-version">v{{ version }}</span>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function scanNetwork() {
+    const btn = document.getElementById('scan-btn');
+    btn.disabled = true;
+    btn.textContent = 'Scanning...';
+    const res = await api('/api/scan-network', 'POST');
+    if (res.ok) {
+        location.reload();
+    }
+    btn.disabled = false;
+    btn.textContent = 'Scan Network';
+}
+
+// --- Buildium integration ---
+
+function buildiumMsg(text, kind) {
+    const el = document.getElementById('buildium-msg');
+    el.textContent = text || '';
+    el.style.color = kind === 'error' ? '#ef4444' :
+                      kind === 'success' ? '#22c55e' : '#888';
+}
+
+function buildiumFormPayload() {
+    return {
+        client_id: document.getElementById('buildium-client-id').value.trim(),
+        client_secret: document.getElementById('buildium-client-secret').value.trim(),
+        base_url: document.getElementById('buildium-base-url').value,
+    };
+}
+
+function fmtSyncCounts(c) {
+    if (!c) return '';
+    const eu = c.external_users || {};
+    const u = c.users || {};
+    return `${u.created || 0} new · ${eu.updated || 0} updated · ` +
+           `${u.inactivated || 0} inactivated · ${c.tokens_revoked || 0} tokens revoked`;
+}
+
+async function buildiumLoadStatus() {
+    const res = await fetch('/api/integrations/buildium');
+    const d = await res.json();
+    const el = document.getElementById('buildium-status');
+    if (!d.configured) {
+        el.textContent = 'Not configured. Enter Client ID + Secret above and Save & Sync.';
+        return;
+    }
+    let html = `<div>Status: configured (client …${d.client_id_tail || '????'}, ${d.base_url})</div>`;
+    if (d.last_sync) {
+        const at = d.last_sync.at || '';
+        const counts = fmtSyncCounts(d.last_sync.counts);
+        html += `<div>Last sync: ${at} · ${counts}</div>`;
+        const errs = (d.last_sync.counts && d.last_sync.counts.errors) || [];
+        if (errs.length) {
+            html += `<div style="color:#ef4444">Errors: ${errs.join('; ')}</div>`;
+        }
+    } else {
+        html += '<div>No sync yet.</div>';
+    }
+    // Pre-fill the base_url select to whatever's saved.
+    const sel = document.getElementById('buildium-base-url');
+    if (d.base_url) sel.value = d.base_url;
+    el.innerHTML = html;
+}
+
+async function buildiumTest() {
+    buildiumMsg('Testing…');
+    const res = await fetch('/api/integrations/buildium/test', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(buildiumFormPayload()),
+    });
+    const d = await res.json();
+    if (!res.ok) { buildiumMsg(d.error || 'Test failed', 'error'); return; }
+    buildiumMsg(`OK · ${d.sample_count} association(s) reachable`, 'success');
+}
+
+async function buildiumSave() {
+    const payload = buildiumFormPayload();
+    if (!payload.client_id || !payload.client_secret) {
+        buildiumMsg('Client ID and Secret are required', 'error'); return;
+    }
+    buildiumMsg('Saving…');
+    const res = await fetch('/api/integrations/buildium', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+    });
+    const d = await res.json();
+    if (!res.ok) { buildiumMsg(d.error || 'Save failed', 'error'); return; }
+    buildiumMsg('Saved · running sync…', 'success');
+    await buildiumSync();
+}
+
+async function buildiumSync() {
+    const btn = document.getElementById('buildium-sync-btn');
+    btn.disabled = true;
+    const oldText = btn.textContent;
+    btn.textContent = 'Syncing…';
+    buildiumMsg('Syncing…');
+    try {
+        const res = await fetch('/api/integrations/buildium/sync', {method: 'POST'});
+        const d = await res.json();
+        if (!res.ok) { buildiumMsg(d.error || 'Sync failed', 'error'); return; }
+        buildiumMsg(`Sync done in ${d.duration_s}s · ${fmtSyncCounts(d)}`, 'success');
+        await buildiumLoadStatus();
+    } finally {
+        btn.disabled = false;
+        btn.textContent = oldText;
+    }
+}
+
+// Load status on page open
+buildiumLoadStatus();
+
+function showAddDoor() {
+    // Build camera and shelly options from current page data
+    const cams = document.querySelectorAll('#cameras-list .device-card');
+    const shells = document.querySelectorAll('#shellys-list .device-card');
+
+    let camOpts = '<option value="">-- Select Camera --</option>';
+    const camRtspData = {};
+    cams.forEach(c => {
+        const name = c.querySelector('strong').textContent;
+        const uuid = c.dataset.uuid || '';
+        const ip = c.querySelector('.device-detail').textContent.split('—')[0].trim();
+        camOpts += `<option value="${uuid}">${name} (${ip})</option>`;
+        try { camRtspData[uuid] = JSON.parse(c.dataset.rtsp || '[]'); } catch(e) { camRtspData[uuid] = []; }
+    });
+
+    let shellyOpts = '<option value="">-- Select Shelly --</option>';
+    shells.forEach(s => {
+        const id = s.querySelector('strong').textContent;
+        const ip = s.querySelector('.device-detail').textContent;
+        shellyOpts += `<option value="${id}">${id} (${ip})</option>`;
+    });
+
+    openModal(`
+        <h2>Add Door</h2>
+        <form onsubmit="event.preventDefault(); addDoor(this)">
+            <label>Door Name</label>
+            <input type="text" name="name" placeholder="Front Door" required autofocus>
+
+            <label>Camera <a href="#" onclick="event.preventDefault(); scanInModal()" style="font-weight:normal;font-size:0.85em;margin-left:0.5em;" id="modal-scan-link">(scan network)</a> <span id="modal-scan-result" style="font-weight:normal;font-size:0.85em;color:#888;"></span></label>
+            <select name="camera_uuid" id="modal-camera-select" onchange="onCameraSelect(this)">${camOpts}</select>
+
+            <div id="rtsp-url-row" style="display:none">
+                <label>RTSP Stream</label>
+                <select id="modal-rtsp-select" onchange="onRtspSelect(this)"></select>
+            </div>
+
+            <label>Camera Username</label>
+            <input type="text" name="camera_user" value="admin">
+
+            <label>Camera Password</label>
+            <input type="text" name="camera_pass">
+
+            <label>Camera Path</label>
+            <input type="text" name="camera_path" id="modal-camera-path" value="/stream2">
+
+            <label>Shelly Device</label>
+            <select name="shelly_device_id" id="modal-shelly-select">${shellyOpts}</select>
+
+            <label>Shelly Password</label>
+            <input type="text" name="shelly_pass">
+
+            <label>Open Duration (seconds)</label>
+            <input type="number" name="open_seconds" value="5" min="1" max="30">
+
+            <button type="submit">Create Door</button>
+        </form>
+    `);
+    _camRtspData = camRtspData;
+}
+
+var _camRtspData = {};
+
+function fetchRtsp(btn, ip, xaddr, uuid) {
+    openModal(`
+        <h2>ONVIF Credentials</h2>
+        <p style="color:#888;font-size:0.9em;margin-bottom:1em;">Camera ${ip} requires authentication to fetch RTSP URLs.</p>
+        <form onsubmit="event.preventDefault(); doFetchRtsp(this, '${ip}', '${xaddr}', '${uuid}')">
+            <label>Username</label>
+            <input type="text" name="username" value="admin" autofocus>
+            <label>Password</label>
+            <input type="password" name="password">
+            <button type="submit" id="fetch-rtsp-btn">Fetch</button>
+        </form>
+    `);
+}
+
+async function doFetchRtsp(form, ip, xaddr, uuid) {
+    const btn = document.getElementById('fetch-rtsp-btn');
+    btn.disabled = true;
+    btn.textContent = 'Fetching...';
+    const fd = new FormData(form);
+    const res = await api('/api/camera-rtsp', 'POST', {
+        ip: ip, xaddr: xaddr,
+        username: fd.get('username'), password: fd.get('password')
+    });
+    if (res.ok) {
+        const data = await res.json();
+        if (data.rtsp_urls && data.rtsp_urls.length > 0) {
+            // Update the camera card
+            const container = document.getElementById('rtsp-' + uuid);
+            if (container) {
+                container.innerHTML = data.rtsp_urls.map(u =>
+                    `<div class="device-detail" style="font-size:0.8em;color:#aaa;">${u.profile}: <code>${u.url}</code></div>`
+                ).join('');
+            }
+            // Update data attribute for Add Door modal
+            const card = document.querySelector(`.device-card[data-uuid="${uuid}"]`);
+            if (card) card.dataset.rtsp = JSON.stringify(data.rtsp_urls);
+            closeModal();
+        } else {
+            btn.disabled = false;
+            btn.textContent = 'Fetch';
+            alert('No RTSP URLs found. Check credentials.');
+        }
+    } else {
+        btn.disabled = false;
+        btn.textContent = 'Fetch';
+        alert('Failed to fetch RTSP URLs.');
+    }
+}
+
+function onCameraSelect(sel) {
+    const uuid = sel.value;
+    const urls = _camRtspData[uuid] || [];
+    const row = document.getElementById('rtsp-url-row');
+    const rtspSel = document.getElementById('modal-rtsp-select');
+    if (urls.length > 0) {
+        let opts = '';
+        urls.forEach(u => {
+            opts += `<option value="${u.url}">${u.profile}</option>`;
+        });
+        rtspSel.innerHTML = opts;
+        row.style.display = '';
+        onRtspSelect(rtspSel);
+    } else {
+        row.style.display = 'none';
+        document.getElementById('modal-camera-path').value = '/stream2';
+    }
+}
+
+function onRtspSelect(sel) {
+    // Use ONVIF session-based path for cameras that don't support static URLs
+    const text = sel.options[sel.selectedIndex].text.toLowerCase();
+    if (text.includes('main')) {
+        document.getElementById('modal-camera-path').value = '/onvif/main';
+    } else if (text.includes('sub')) {
+        document.getElementById('modal-camera-path').value = '/onvif/sub';
+    } else {
+        document.getElementById('modal-camera-path').value = '/onvif/main';
+    }
+}
+
+async function scanInModal() {
+    const link = document.getElementById('modal-scan-link');
+    const result = document.getElementById('modal-scan-result');
+    link.textContent = '(scanning...)';
+    result.textContent = '';
+    const res = await api('/api/scan-network', 'POST');
+    link.textContent = '(scan network)';
+    if (res.ok) {
+        const data = await res.json();
+        // Update camera dropdown
+        const camSelect = document.getElementById('modal-camera-select');
+        if (camSelect && data.cameras) {
+            let opts = '<option value="">-- Select Camera --</option>';
+            data.cameras.forEach(c => {
+                opts += `<option value="${c.uuid}">${c.name || 'Unknown'} (${c.ip})</option>`;
+                _camRtspData[c.uuid] = c.rtsp_urls || [];
+            });
+            camSelect.innerHTML = opts;
+            // Reset RTSP dropdown
+            document.getElementById('rtsp-url-row').style.display = 'none';
+        }
+        // Update shelly dropdown (shellys is a dict: {device_id: ip})
+        const shellySelect = document.getElementById('modal-shelly-select');
+        const shellyEntries = data.shellys ? Object.entries(data.shellys) : [];
+        if (shellySelect) {
+            let opts = '<option value="">-- Select Shelly --</option>';
+            shellyEntries.forEach(([id, ip]) => {
+                opts += `<option value="${id}">${id} (${ip})</option>`;
+            });
+            shellySelect.innerHTML = opts;
+        }
+        result.textContent = `found ${(data.cameras||[]).length} camera(s), ${shellyEntries.length} shelly(s)`;
+    } else {
+        result.textContent = 'scan failed';
+        result.style.color = '#e55';
+    }
+}
+
+async function addDoor(form) {
+    const data = {};
+    new FormData(form).forEach((v, k) => data[k] = v);
+    const res = await api('/api/doors', 'POST', data);
+    if (res.ok) location.reload();
+    return false;
+}
+
+async function deleteDoor(id, name) {
+    confirmAction(`Delete door <strong>${name}</strong>?`, async () => {
+        const res = await api(`/api/doors/${id}`, 'DELETE');
+        if (res.ok) document.getElementById(`door-${id}`).remove();
+    });
+}
+
+async function testShelly(doorId) {
+    const btn = event.target;
+    const status = document.getElementById('shelly-status-' + doorId);
+    btn.disabled = true;
+    btn.textContent = 'Testing...';
+    status.textContent = '';
+    try {
+        const res = await api('/api/test-shelly', 'POST', {door_id: doorId});
+        const data = await res.json();
+        if (res.ok && data.ok) {
+            status.textContent = '✓ connected';
+            status.style.color = '#4ade80';
+        } else {
+            status.textContent = '✗ ' + (data.error || 'failed');
+            status.style.color = '#f87171';
+        }
+    } catch(e) {
+        status.textContent = '✗ error';
+        status.style.color = '#f87171';
+    }
+    btn.textContent = 'Test';
+    btn.disabled = false;
+}
+
+// Poll camera status every 10s
+async function updateCameraStatus() {
+    try {
+        const res = await fetch('/api/camera-status');
+        if (res.ok) {
+            const data = await res.json();
+            const now = Date.now() / 1000;
+            for (const [doorName, info] of Object.entries(data)) {
+                const el = document.getElementById('cam-status-' + doorName);
+                if (!el) continue;
+                if (!info.last_frame_ts) {
+                    el.textContent = '(no frames)';
+                    el.style.color = '#888';
+                    continue;
+                }
+                const ago = now - info.last_frame_ts;
+                if (ago < 10) {
+                    el.textContent = '(just now)';
+                    el.style.color = '#4ade80';
+                } else if (ago < 120) {
+                    el.textContent = `(${Math.floor(ago)}s ago)`;
+                    el.style.color = '#fbbf24';
+                } else {
+                    const min = Math.floor(ago / 60);
+                    const sec = Math.floor(ago % 60);
+                    el.textContent = `(${min}m ${sec}s ago)`;
+                    el.style.color = '#f87171';
+                }
+            }
+        }
+    } catch(e) {}
+}
+updateCameraStatus();
+setInterval(updateCameraStatus, 10000);
+
+</script>
+{% endblock %}

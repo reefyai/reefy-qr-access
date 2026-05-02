@@ -1,0 +1,30 @@
+{
+  "slug": "qr-access",
+  "version": "v2026.05.02-00",
+  "name": "QR Access",
+  "icon": "/static/icons/qr-access.png",
+  "description": "QR code door access control with GPU-accelerated detection",
+  "image": "ghcr.io/reefyai/reefy-qr-access:v2026.05.02-00",
+  "default_port": 8080,
+  "network_mode": "host",
+  "dynamic_port": true,
+  "volumes": {
+    "config": {
+      "mount": "/app/config",
+      "uid": 0,
+      "backup": [
+        "borgbase"
+      ]
+    },
+    "video-logs": {
+      "mount": "/app/video-logs",
+      "uid": 0,
+      "backup": []
+    }
+  },
+  "env": {},
+  "gpu": true,
+  "tags": [
+    "pro"
+  ]
+}

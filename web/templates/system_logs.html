@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}System Logs - QR Access{% endblock %}
+{% block content %}
+<div class="header-row">
+    <h1>System Logs</h1>
+    <div>
+        <span class="live-badge" id="live-badge">LIVE</span>
+        <button class="btn-sm" onclick="clearLogs()">Clear</button>
+        <button class="btn-sm" onclick="scrollToBottom()">↓ Bottom</button>
+    </div>
+</div>
+
+<div id="syslog-container" style="background:#0a0a0a;border:1px solid #222;border-radius:4px;padding:0.5rem;height:calc(100vh - 160px);overflow-y:auto;font-family:monospace;font-size:0.75rem;color:#aaa;line-height:1.5;">
+{% for line in lines %}
+<div class="syslog-line">{{ line }}</div>
+{% endfor %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const container = document.getElementById('syslog-container');
+const badge = document.getElementById('live-badge');
+let autoScroll = true;
+
+// Detect if user scrolled up (disable auto-scroll)
+container.addEventListener('scroll', () => {
+    const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+    autoScroll = atBottom;
+});
+
+// SSE for real-time log updates
+const evtSource = new EventSource('/api/system-logs/stream');
+
+evtSource.onmessage = function(event) {
+    const data = JSON.parse(event.data);
+    const div = document.createElement('div');
+    div.className = 'syslog-line';
+    if (data.stream === 'stderr') {
+        div.style.color = '#f87171';
+    }
+    div.textContent = data.line;
+    container.appendChild(div);
+
+    // Limit to 2000 lines in DOM
+    while (container.children.length > 2000) {
+        container.removeChild(container.firstChild);
+    }
+
+    if (autoScroll) {
+        container.scrollTop = container.scrollHeight;
+    }
+};
+
+evtSource.onerror = function() {
+    badge.textContent = 'DISCONNECTED';
+    badge.classList.add('badge-disconnected');
+};
+
+evtSource.onopen = function() {
+    badge.textContent = 'LIVE';
+    badge.classList.remove('badge-disconnected');
+};
+
+function clearLogs() {
+    container.innerHTML = '';
+}
+
+function scrollToBottom() {
+    container.scrollTop = container.scrollHeight;
+    autoScroll = true;
+}
+
+// Auto-scroll to bottom on load
+scrollToBottom();
+</script>
+{% endblock %}

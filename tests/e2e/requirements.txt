@@ -1,0 +1,10 @@
+pytest>=7.0
+pytest-playwright>=0.4
+playwright>=1.40
+responses>=0.24
+flask
+requests
+qrcode
+Pillow
+zeroconf
+pyyaml

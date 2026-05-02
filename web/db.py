@@ -1,0 +1,544 @@
+"""SQLite database layer for QR Access."""
+
+import sqlite3
+import threading
+import os
+from pathlib import Path
+
+DB_DIR = os.environ.get('QR_CONFIG_DIR', 'config')
+DB_PATH = os.path.join(DB_DIR, 'qr_access.db')
+
+# Thread-local storage for connections
+_local = threading.local()
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    full_name TEXT NOT NULL,
+    email TEXT,
+    address TEXT NOT NULL DEFAULT '',
+    external_user_id INTEGER REFERENCES external_users(id),
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_via TEXT NOT NULL DEFAULT 'manual',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token TEXT NOT NULL UNIQUE,
+    comment TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS external_users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    first_name TEXT NOT NULL DEFAULT '',
+    last_name TEXT NOT NULL DEFAULT '',
+    email TEXT,
+    alternate_email TEXT,
+    phone_primary TEXT,
+    phone_secondary TEXT,
+    unit_source_id TEXT,
+    unit_label TEXT,
+    building TEXT,
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    is_active_at_source INTEGER NOT NULL DEFAULT 1,
+    first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_synced_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (source, source_kind, source_id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_external_user_id
+    ON users(external_user_id) WHERE external_user_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS cameras (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ip TEXT NOT NULL,
+    uuid TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL DEFAULT '',
+    hardware TEXT NOT NULL DEFAULT '',
+    xaddr TEXT NOT NULL DEFAULT '',
+    rtsp_urls TEXT NOT NULL DEFAULT '[]',
+    last_seen TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS shellys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL UNIQUE,
+    ip TEXT NOT NULL,
+    last_seen TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS doors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    camera_uuid TEXT NOT NULL DEFAULT '',
+    camera_user TEXT NOT NULL DEFAULT 'admin',
+    camera_pass TEXT NOT NULL DEFAULT '',
+    camera_path TEXT NOT NULL DEFAULT '/stream2',
+    camera_port INTEGER NOT NULL DEFAULT 554,
+    shelly_device_id TEXT NOT NULL DEFAULT '',
+    shelly_pass TEXT NOT NULL DEFAULT '',
+    open_seconds INTEGER NOT NULL DEFAULT 5
+);
+
+CREATE TABLE IF NOT EXISTS access_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    door_name TEXT NOT NULL DEFAULT '',
+    token TEXT NOT NULL,
+    event TEXT NOT NULL,
+    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+    video_path TEXT DEFAULT NULL
+);
+"""
+
+MIGRATION = """
+-- Migrate old users table that had token column
+-- Only runs if the old schema exists
+"""
+
+
+def get_db():
+    """Get a thread-local database connection (reused per thread)."""
+    db = getattr(_local, 'db', None)
+    if db is None:
+        Path(DB_DIR).mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(DB_PATH, timeout=30,
+                             check_same_thread=False)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA foreign_keys=ON")
+        db.execute("PRAGMA busy_timeout=30000")
+        _local.db = db
+    return db
+
+
+def init_db():
+    db = get_db()
+    db.executescript(SCHEMA)
+
+    # Migrate: if old users table has 'token' column, move tokens to new table
+    cols = [r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()]
+    if 'token' in cols:
+        # Move existing tokens to tokens table
+        rows = db.execute(
+            "SELECT id, token FROM users WHERE token IS NOT NULL AND token != ''"
+        ).fetchall()
+        for row in rows:
+            try:
+                db.execute(
+                    "INSERT OR IGNORE INTO tokens (user_id, token, comment) "
+                    "VALUES (?, ?, 'created')",
+                    (row['id'], row['token']))
+            except Exception:
+                pass
+
+        # Remove old columns by recreating users table
+        db.executescript("""
+            CREATE TABLE IF NOT EXISTS users_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                full_name TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                address TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            INSERT OR IGNORE INTO users_new (id, full_name, email, address, created_at)
+                SELECT id, full_name, email, address, created_at FROM users;
+            DROP TABLE users;
+            ALTER TABLE users_new RENAME TO users;
+        """)
+
+    # Migrate cameras table: add rtsp_urls if missing
+    cam_cols = [r[1] for r in db.execute("PRAGMA table_info(cameras)").fetchall()]
+    if 'rtsp_urls' not in cam_cols:
+        db.execute("ALTER TABLE cameras ADD COLUMN rtsp_urls TEXT NOT NULL DEFAULT '[]'")
+
+    # Migrate users table: add columns introduced for external-source sync.
+    user_cols = [r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()]
+    if 'external_user_id' not in user_cols:
+        db.execute("ALTER TABLE users ADD COLUMN external_user_id INTEGER REFERENCES external_users(id)")
+    if 'is_active' not in user_cols:
+        db.execute("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+    if 'created_via' not in user_cols:
+        db.execute("ALTER TABLE users ADD COLUMN created_via TEXT NOT NULL DEFAULT 'manual'")
+
+    db.commit()
+
+
+# --- User helpers ---
+
+def _commit():
+    """Commit, rolling back on error to release locks."""
+    db = get_db()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _write(fn):
+    """Execute a write operation with automatic rollback on failure."""
+    db = get_db()
+    try:
+        result = fn(db)
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
+
+
+def create_user(full_name, email, address):
+    def op(db):
+        db.execute(
+            "INSERT INTO users (full_name, email, address) VALUES (?,?,?)",
+            (full_name, email, address))
+        return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    return _write(op)
+
+
+def get_users():
+    db = get_db()
+    rows = db.execute("""
+        SELECT u.id, u.full_name, u.email, u.address, u.is_active,
+               u.created_via, u.external_user_id, u.created_at,
+               eu.unit_label, eu.building, eu.phone_primary,
+               eu.alternate_email, eu.source AS external_source,
+               eu.source_kind AS external_source_kind,
+               eu.is_active_at_source
+        FROM users u
+        LEFT JOIN external_users eu ON eu.id = u.external_user_id
+        ORDER BY u.created_at DESC
+    """).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_user(user_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def delete_user(user_id):
+    def op(db):
+        db.execute("DELETE FROM users WHERE id=?", (user_id,))
+    _write(op)
+
+
+# --- Token helpers ---
+
+def create_token_for_user(user_id, token, comment=''):
+    def op(db):
+        db.execute(
+            "INSERT INTO tokens (user_id, token, comment) VALUES (?,?,?)",
+            (user_id, token, comment))
+        return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    return _write(op)
+
+
+def get_user_tokens(user_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM tokens WHERE user_id=? ORDER BY created_at DESC",
+        (user_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def revoke_token(token_id):
+    def op(db):
+        db.execute("UPDATE tokens SET active=0 WHERE id=?", (token_id,))
+    _write(op)
+
+
+def get_all_active_tokens():
+    db = get_db()
+    rows = db.execute("SELECT token FROM tokens WHERE active=1").fetchall()
+    return [r['token'] for r in rows]
+
+
+# --- Camera helpers ---
+
+def upsert_cameras(cameras):
+    import json
+    def op(db):
+        db.execute("DELETE FROM cameras")
+        for cam in cameras:
+            rtsp_urls = json.dumps(cam.get('rtsp_urls', []))
+            db.execute(
+                "INSERT INTO cameras (ip, uuid, name, hardware, xaddr, rtsp_urls) "
+                "VALUES (?,?,?,?,?,?)",
+                (cam['ip'], cam['uuid'], cam['name'],
+                 cam['hardware'], cam['xaddr'], rtsp_urls))
+    _write(op)
+
+
+def get_cameras():
+    import json
+    db = get_db()
+    rows = db.execute("SELECT * FROM cameras ORDER BY name").fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d['rtsp_urls'] = json.loads(d.get('rtsp_urls', '[]'))
+        except (json.JSONDecodeError, TypeError):
+            d['rtsp_urls'] = []
+        result.append(d)
+    return result
+
+
+# --- Shelly helpers ---
+
+def upsert_shellys(shellys):
+    def op(db):
+        db.execute("DELETE FROM shellys")
+        for device_id, ip in shellys.items():
+            db.execute(
+                "INSERT INTO shellys (device_id, ip) VALUES (?,?)",
+                (device_id, ip))
+    _write(op)
+
+
+def get_shellys():
+    db = get_db()
+    rows = db.execute("SELECT * FROM shellys ORDER BY device_id").fetchall()
+    return [dict(r) for r in rows]
+
+
+# --- Door helpers ---
+
+def create_door(name, camera_uuid, camera_user, camera_pass, camera_path,
+                camera_port, shelly_device_id, shelly_pass, open_seconds):
+    def op(db):
+        db.execute(
+            "INSERT INTO doors (name, camera_uuid, camera_user, camera_pass, "
+            "camera_path, camera_port, shelly_device_id, shelly_pass, open_seconds) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (name, camera_uuid, camera_user, camera_pass, camera_path,
+             camera_port, shelly_device_id, shelly_pass, open_seconds))
+        return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    return _write(op)
+
+
+def get_doors():
+    db = get_db()
+    rows = db.execute("SELECT * FROM doors ORDER BY name").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_door(door_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM doors WHERE id=?", (door_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_door(door_id, **kwargs):
+    def op(db):
+        sets = ', '.join(f"{k}=?" for k in kwargs)
+        vals = list(kwargs.values()) + [door_id]
+        db.execute(f"UPDATE doors SET {sets} WHERE id=?", vals)
+    _write(op)
+
+
+def delete_door(door_id):
+    def op(db):
+        db.execute("DELETE FROM doors WHERE id=?", (door_id,))
+    _write(op)
+
+
+# --- Access log helpers ---
+
+def log_access(door_name, token, event, video_path=None):
+    def op(db):
+        db.execute(
+            "INSERT INTO access_log (door_name, token, event, video_path) "
+            "VALUES (?,?,?,?)",
+            (door_name, token, event, video_path))
+        return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    return _write(op)
+
+
+def get_access_logs(limit=200):
+    """Get recent access logs joined with user/token info."""
+    db = get_db()
+    rows = db.execute("""
+        SELECT
+            access_log.id,
+            access_log.door_name,
+            access_log.token,
+            access_log.event,
+            access_log.timestamp,
+            access_log.video_path,
+            users.full_name,
+            tokens.active as token_active
+        FROM access_log
+        LEFT JOIN tokens ON access_log.token = tokens.token
+        LEFT JOIN users ON tokens.user_id = users.id
+        ORDER BY access_log.id DESC
+        LIMIT ?
+    """, (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_access_logs_since(last_id):
+    """Get access logs newer than last_id, joined with user/token info."""
+    db = get_db()
+    rows = db.execute("""
+        SELECT
+            access_log.id,
+            access_log.door_name,
+            access_log.token,
+            access_log.event,
+            access_log.timestamp,
+            access_log.video_path,
+            users.full_name,
+            tokens.active as token_active
+        FROM access_log
+        LEFT JOIN tokens ON access_log.token = tokens.token
+        LEFT JOIN users ON tokens.user_id = users.id
+        WHERE access_log.id > ?
+        ORDER BY access_log.id ASC
+    """, (last_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# --- App settings (key/value JSON store) ---
+
+def get_setting(key, default=None):
+    import json as _json
+    db = get_db()
+    row = db.execute(
+        "SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    if not row:
+        return default
+    try:
+        return _json.loads(row['value'])
+    except (ValueError, TypeError):
+        return default
+
+
+def set_setting(key, value):
+    import json as _json
+    def op(db):
+        db.execute("""
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(key) DO UPDATE SET
+                value=excluded.value,
+                updated_at=excluded.updated_at
+        """, (key, _json.dumps(value)))
+    _write(op)
+
+
+# --- External users (synced from Buildium / future sources) ---
+
+def get_external_users(source=None):
+    """Return all external_users rows. Filter by source if provided."""
+    db = get_db()
+    if source:
+        rows = db.execute(
+            "SELECT * FROM external_users WHERE source=?", (source,)).fetchall()
+    else:
+        rows = db.execute("SELECT * FROM external_users").fetchall()
+    return [dict(r) for r in rows]
+
+
+def upsert_external_user(source, source_kind, source_id, fields):
+    """Insert or update an external_users row keyed on
+    (source, source_kind, source_id). `fields` is a dict of common columns
+    plus raw_json. Returns (row_id, created_bool, reactivated_bool).
+    """
+    import json as _json
+    db = get_db()
+    existing = db.execute("""
+        SELECT id, is_active_at_source FROM external_users
+        WHERE source=? AND source_kind=? AND source_id=?
+    """, (source, source_kind, str(source_id))).fetchone()
+
+    payload = dict(fields)
+    if 'raw_json' in payload and not isinstance(payload['raw_json'], str):
+        payload['raw_json'] = _json.dumps(payload['raw_json'])
+
+    if existing:
+        reactivated = existing['is_active_at_source'] == 0
+        cols = list(payload.keys()) + ['is_active_at_source', 'last_synced_at']
+        sets = ', '.join(f"{c}=?" for c in cols)
+        vals = list(payload.values()) + [1, _now()]
+        vals.append(existing['id'])
+        db.execute(
+            f"UPDATE external_users SET {sets} WHERE id=?", vals)
+        return existing['id'], False, reactivated
+    else:
+        cols = ['source', 'source_kind', 'source_id'] + list(payload.keys())
+        placeholders = ','.join('?' * len(cols))
+        vals = [source, source_kind, str(source_id)] + list(payload.values())
+        db.execute(
+            f"INSERT INTO external_users ({','.join(cols)}) VALUES ({placeholders})",
+            vals)
+        new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return new_id, True, False
+
+
+def _now():
+    db = get_db()
+    return db.execute("SELECT datetime('now')").fetchone()[0]
+
+
+def find_user_by_external(external_user_id):
+    db = get_db()
+    row = db.execute(
+        "SELECT * FROM users WHERE external_user_id=?",
+        (external_user_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def create_user_from_external(external_user_id, full_name, email, address,
+                               created_via):
+    """Create a user row backed by an external_users row. Bypasses the
+    UNIQUE-email validation enforced on manual creates."""
+    db = get_db()
+    db.execute(
+        "INSERT INTO users (full_name, email, address, external_user_id, "
+        "is_active, created_via) VALUES (?,?,?,?,1,?)",
+        (full_name, email, address, external_user_id, created_via))
+    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def set_user_active(user_id, active):
+    db = get_db()
+    db.execute("UPDATE users SET is_active=? WHERE id=?",
+               (1 if active else 0, user_id))
+
+
+def revoke_user_tokens(user_id):
+    """Mark all of a user's tokens inactive. Returns count revoked."""
+    db = get_db()
+    cur = db.execute(
+        "UPDATE tokens SET active=0 WHERE user_id=? AND active=1",
+        (user_id,))
+    return cur.rowcount
+
+
+def begin_transaction():
+    """Use as a context manager: `with db.begin_transaction():`."""
+    return get_db()
+
+
+def commit():
+    get_db().commit()
+
+
+def rollback():
+    get_db().rollback()

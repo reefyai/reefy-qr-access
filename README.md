@@ -1,0 +1,98 @@
+# QR Access
+
+GPU-accelerated QR-code door access control. Reads RTSP from one or more
+IP cameras, detects QR codes with YOLO + zxing-cpp, validates against a
+local user database, and triggers a Shelly relay to unlock the door.
+
+Ships as a single container with a Flask admin UI (user/token management,
+camera + door config, live access log, optional Buildium resident sync).
+
+## Architecture
+
+```
+RTSP camera
+    │
+    ▼
+FFmpeg H.264 software decode (CPU, via cv2.VideoCapture)
+    │
+    ▼
+YOLOv8 region detection (TensorRT FP16 on GPU)
+    │
+    ▼
+zxing-cpp QR data decode (CPU, on small crops)
+    │
+    ▼
+token lookup (SQLite)  ──►  Shelly relay unlocks door
+    │
+    ▼
+access_log row + MQTT event
+```
+
+Per-camera CPU is dominated by software H.264 decode (~1 core at 720p).
+Migrating decode to NVDEC (PyNvVideoCodec or `hwaccel;cuvid` via FFmpeg)
+is tracked as a future improvement.
+
+## Run (Docker)
+
+```bash
+docker run -d --gpus all \
+  -p 8080:8080 \
+  -v ./config:/app/config \
+  -v ./video-logs:/app/video-logs \
+  -e QR_ADMIN_PASSWORD=<your-password> \
+  ghcr.io/reefyai/reefy-qr-access:latest
+```
+
+Then open `http://<host>:8080`, log in, and:
+
+1. **Settings → Available Devices → Scan Network** discovers ONVIF cameras
+   and Shelly relays on the LAN.
+2. **Settings → Doors → Add Door** pairs a camera to a Shelly relay.
+3. **Users → Add User** creates a resident; the system generates a unique
+   QR token. Print/share the QR; show it to the camera; the door unlocks.
+
+## Buildium integration (optional)
+
+If your building uses [Buildium](https://www.buildium.com/) for resident
+management, **Settings → Integrations → Buildium** can pull all owners +
+tenants on demand. Re-syncing is idempotent: new residents are added,
+removed residents are inactivated (their tokens are revoked, but the
+historical access log is preserved). See
+[docs/buildium-integration.md](docs/buildium-integration.md) for the design.
+
+## Repo layout
+
+```
+├── run.py                       # entrypoint: starts web UI + detector loop
+├── qr_live.py                   # multi-door RTSP detector + Shelly control
+├── web/                         # Flask app
+│   ├── app.py                   # routes
+│   ├── db.py                    # SQLite schema + helpers
+│   ├── services/buildium.py     # Buildium API client + sync orchestrator
+│   └── templates/, static/      # Jinja2 + vanilla JS
+├── tests/e2e/                   # pytest + Playwright e2e suite
+├── docs/                        # design notes
+├── reefy/                       # canonical app spec (version, icon) for the
+│                                #  Reefy app catalog
+└── Dockerfile                   # CUDA 12.9 + GPU deps
+```
+
+## Development
+
+```bash
+git clone https://github.com/reefyai/reefy-qr-access.git
+cd reefy-qr-access
+python3 -m venv .venv-e2e
+. .venv-e2e/bin/activate
+pip install -r tests/e2e/requirements.txt
+playwright install chromium
+pytest tests/e2e/ -v
+```
+
+## Releasing
+
+Bump the `version` and `image` fields in [`reefy/app.json`](reefy/app.json),
+commit + push to `main`. GitHub Actions
+([`.github/workflows/build.yml`](.github/workflows/build.yml)) reads the new
+tag from `reefy/app.json`, builds the image, and pushes to GHCR. Then update
+the catalog entry in `reefy-service/apps/qr-access/app.json` to match.

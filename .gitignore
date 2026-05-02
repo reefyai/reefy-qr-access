@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv-*/
+venv/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models (generated, GPU-specific)
+*.engine
+*.onnx
+models/
+
+# Runtime data (mounted into container at /app/config and /app/video-logs)
+config/
+video-logs/
+qr-codes/
+tmp/
+
+# Claude Code
+.claude/
