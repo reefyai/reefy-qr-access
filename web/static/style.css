@@ -443,6 +443,40 @@ td { font-size: 0.9rem; }
     100% { background: transparent; }
 }
 
+/* Access-log video thumbnail. Saved by the detector alongside the
+   event video; click expands to the full clip in the modal. Old log
+   rows have null thumbnail_path and fall back to a "Play" button. */
+.event-thumb {
+    position: relative;
+    display: inline-block;
+    width: 88px;
+    height: 60px;
+    border-radius: 4px;
+    overflow: hidden;
+    cursor: pointer;
+    background: #111;
+    text-decoration: none;
+}
+.event-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+.event-thumb .play-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 1.4rem;
+    background: rgba(0, 0, 0, 0.18);
+    transition: background 0.12s;
+    text-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+}
+.event-thumb:hover .play-overlay { background: rgba(0, 0, 0, 0.45); }
+
 .token-cell { font-family: monospace; font-size: 0.8rem; color: #888; }
 .unknown-user { color: #999; font-style: italic; }
 .modal-table { font-size: 0.85rem; }

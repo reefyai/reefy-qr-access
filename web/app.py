@@ -119,6 +119,19 @@ def api_video(video_path):
     return send_file(full_path, mimetype='video/mp4')
 
 
+@app.route('/api/thumbnail/<path:thumb_path>')
+@login_required
+def api_thumbnail(thumb_path):
+    """Serve event thumbnails saved alongside the video."""
+    video_dir = os.path.join(os.getcwd(), 'video-logs')
+    full_path = os.path.realpath(os.path.join(video_dir, thumb_path))
+    if not full_path.startswith(os.path.realpath(video_dir)):
+        return 'Forbidden', 403
+    if not os.path.exists(full_path):
+        return 'Not found', 404
+    return send_file(full_path, mimetype='image/jpeg')
+
+
 @app.route('/settings')
 @login_required
 def settings():

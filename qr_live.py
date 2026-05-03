@@ -906,6 +906,23 @@ class VideoLogger:
         writer.release()
         total = len(pre_frames) + len(post_frames)
 
+        # Save a JPG thumbnail of the moment-of-detection frame so the
+        # access log can render a clickable preview instead of just a
+        # bare "Play" button. The last pre_frame is roughly when the QR
+        # entered view; falls back to first post_frame, then nothing
+        # (older rows already render "Play" for null thumbnail_path).
+        try:
+            thumb_frame = None
+            if pre_frames:
+                thumb_frame = pre_frames[-1][0]
+            elif post_frames:
+                thumb_frame = post_frames[0]
+            if thumb_frame is not None:
+                cv2.imwrite(str(event_dir / 'thumbnail.jpg'),
+                            thumb_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        except Exception as e:
+            print(f"[WARN] [{door_name}] thumbnail save failed: {e}")
+
         # Re-encode to H.264 for browser playback (try NVENC GPU, fallback CPU)
         import subprocess
         encoded = False
@@ -1057,22 +1074,31 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                               f"conf={confidence:.2f}, "
                               f"lag={frame_lag:.1f}s)")
 
-                    # Try to record video (may be skipped by cooldown)
+                    # Try to record video (may be skipped by cooldown).
+                    # Predict both video + thumbnail relative paths; the
+                    # background recorder writes them under the same
+                    # event_dir, and the dashboard's <img> + Play link
+                    # both fall back to the legacy bare button when null.
                     video_rel = None
+                    thumb_rel = None
                     if video_logger:
                         video_ts = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
                         safe_name = door_cfg.name.replace(' ', '_')
-                        video_rel = f"{safe_name}/{event}-{video_ts}/video.mp4"
+                        evdir = f"{safe_name}/{event}-{video_ts}"
+                        video_rel = f"{evdir}/video.mp4"
+                        thumb_rel = f"{evdir}/thumbnail.jpg"
                         if not video_logger.log_event(
                                 door_cfg.name, event, token,
                                 confidence, door_cfg.camera):
-                            video_rel = None  # cooldown — no video recorded
+                            video_rel = None  # cooldown - no video recorded
+                            thumb_rel = None
 
                     # Log to database and push to event bus
                     try:
                         from web.db import log_access
                         log_id = log_access(door_cfg.name, token, event,
-                                            video_path=video_rel)
+                                            video_path=video_rel,
+                                            thumbnail_path=thumb_rel)
                         # Push to SSE clients via event bus
                         from web.events import event_bus
                         from web.db import get_access_logs_since

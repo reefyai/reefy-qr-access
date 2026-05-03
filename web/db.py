@@ -112,7 +112,8 @@ CREATE TABLE IF NOT EXISTS access_log (
     token TEXT NOT NULL,
     event TEXT NOT NULL,
     timestamp TEXT NOT NULL DEFAULT (datetime('now')),
-    video_path TEXT DEFAULT NULL
+    video_path TEXT DEFAULT NULL,
+    thumbnail_path TEXT DEFAULT NULL
 );
 """
 
@@ -176,6 +177,13 @@ def init_db():
     cam_cols = [r[1] for r in db.execute("PRAGMA table_info(cameras)").fetchall()]
     if 'rtsp_urls' not in cam_cols:
         db.execute("ALTER TABLE cameras ADD COLUMN rtsp_urls TEXT NOT NULL DEFAULT '[]'")
+
+    # Migrate access_log table: thumbnail_path for event screenshots.
+    # Old rows stay NULL so the dashboard renders the legacy "Play" button
+    # for them; new rows populated by the detector get a JPG thumbnail.
+    log_cols = [r[1] for r in db.execute("PRAGMA table_info(access_log)").fetchall()]
+    if 'thumbnail_path' not in log_cols:
+        db.execute("ALTER TABLE access_log ADD COLUMN thumbnail_path TEXT DEFAULT NULL")
 
     # Migrate users table: add columns introduced for external-source sync.
     # Must run BEFORE the index below, which references external_user_id.
@@ -434,12 +442,12 @@ def delete_door(door_id):
 
 # --- Access log helpers ---
 
-def log_access(door_name, token, event, video_path=None):
+def log_access(door_name, token, event, video_path=None, thumbnail_path=None):
     def op(db):
         db.execute(
-            "INSERT INTO access_log (door_name, token, event, video_path) "
-            "VALUES (?,?,?,?)",
-            (door_name, token, event, video_path))
+            "INSERT INTO access_log (door_name, token, event, video_path, thumbnail_path) "
+            "VALUES (?,?,?,?,?)",
+            (door_name, token, event, video_path, thumbnail_path))
         return db.execute("SELECT last_insert_rowid()").fetchone()[0]
     return _write(op)
 
@@ -455,6 +463,7 @@ def get_access_logs(limit=200):
             access_log.event,
             access_log.timestamp,
             access_log.video_path,
+            access_log.thumbnail_path,
             users.full_name,
             tokens.active as token_active
         FROM access_log
@@ -477,6 +486,7 @@ def get_access_logs_since(last_id):
             access_log.event,
             access_log.timestamp,
             access_log.video_path,
+            access_log.thumbnail_path,
             users.full_name,
             tokens.active as token_active
         FROM access_log

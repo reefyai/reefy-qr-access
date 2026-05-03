@@ -40,7 +40,12 @@
             <td data-label="Token" class="token-cell">{{ e.token[:8] }}...</td>
             <td data-label="Door">{{ e.door_name }}</td>
             <td data-label="Video">
-                {% if e.video_path %}
+                {% if e.thumbnail_path and e.video_path %}
+                <a href="#" class="event-thumb" onclick="event.preventDefault(); playVideo('/api/video/{{ e.video_path }}', this)">
+                    <img src="/api/thumbnail/{{ e.thumbnail_path }}" alt="event">
+                    <span class="play-overlay">&#9654;</span>
+                </a>
+                {% elif e.video_path %}
                 <button class="btn-sm" onclick="playVideo('/api/video/{{ e.video_path }}', this)">&#9654; Play</button>
                 {% else %}
                 <span class="no-video">—</span>
@@ -134,9 +139,17 @@ async function playVideo(url, btn) {
             userCell = '<span class="unknown-user">Unknown</span>';
         }
 
-        const videoCell = e.video_path
-            ? `<button class="btn-sm" onclick="playVideo('/api/video/${e.video_path}', this)">&#9654; Play</button>`
-            : '<span class="no-video">—</span>';
+        let videoCell;
+        if (e.thumbnail_path && e.video_path) {
+            videoCell = `<a href="#" class="event-thumb" onclick="event.preventDefault(); playVideo('/api/video/${e.video_path}', this)">
+                <img src="/api/thumbnail/${e.thumbnail_path}" alt="event">
+                <span class="play-overlay">&#9654;</span>
+            </a>`;
+        } else if (e.video_path) {
+            videoCell = `<button class="btn-sm" onclick="playVideo('/api/video/${e.video_path}', this)">&#9654; Play</button>`;
+        } else {
+            videoCell = '<span class="no-video">—</span>';
+        }
 
         tr.innerHTML = `
             <td data-label="Time">${e.timestamp} <span class="time-ago" data-ts="${e.timestamp}"></span></td>
