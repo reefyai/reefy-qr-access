@@ -244,6 +244,62 @@ def test_manual_user_with_phone(app_server):
     assert len(tokens) == 1 and tokens[0]['active'] == 1
 
 
+def test_raw_json_strips_sensitive_fields(app_server, buildium_mock):
+    """external_users.raw_json must not persist Buildium's sensitive
+    fields (TaxId, EmergencyContact, DelinquencyStatus, ...). The
+    sync-time allowlist drops them; this test makes sure regressions
+    don't leak fields the qr-access feature set never needs."""
+    import json as _json
+    # Inject a sensitive-laden owner record into the mock and sync.
+    sensitive_owner = {
+        'Id': 9999, 'FirstName': 'Sensitive', 'LastName': 'Tester',
+        'Email': 'sensitive@example.com', 'AlternateEmail': '',
+        'PhoneNumbers': [],
+        'PrimaryAddress': {'AddressLine1': 'should-not-persist'},
+        'OwnershipAccounts': [{
+            'AssociationId': 1000, 'UnitId': 5001, 'Status': 'Active',
+            'Comments': 'super secret note',
+            'DateOfPurchase': '2020-01-01',
+            'DelinquencyStatus': 'Delinquent',
+        }],
+        'TaxId': '123-45-6789',
+        'EmergencyContact': {'Name': 'Mom', 'Phone': '555-0000'},
+        'DelinquencyStatus': 'Delinquent',
+        'BoardMemberTerms': [{'Role': 'President'}],
+        'OccupiesUnit': True,
+    }
+    buildium_mock.reset()
+    install_buildium_routes(buildium_mock, owners=[sensitive_owner], tenants=[])
+
+    requests.post(f"{app_server['base_url']}/api/integrations/buildium",
+                   json=CREDS, timeout=10).raise_for_status()
+    requests.post(f"{app_server['base_url']}/api/integrations/buildium/sync",
+                   timeout=30).raise_for_status()
+
+    app = app_server['app']
+    row = app.db.get_db().execute(
+        "SELECT raw_json FROM external_users WHERE source_id='9999'"
+    ).fetchone()
+    payload = _json.loads(row['raw_json'])
+
+    # Allowlisted fields survived
+    assert payload.get('FirstName') == 'Sensitive'
+    assert payload.get('Email') == 'sensitive@example.com'
+    assert payload['OwnershipAccounts'][0].get('UnitId') == 5001
+
+    # Sensitive fields were dropped
+    assert 'TaxId' not in payload
+    assert 'EmergencyContact' not in payload
+    assert 'DelinquencyStatus' not in payload
+    assert 'BoardMemberTerms' not in payload
+    assert 'PrimaryAddress' not in payload
+    # Sub-fields inside OwnershipAccounts also dropped
+    acc = payload['OwnershipAccounts'][0]
+    assert 'Comments' not in acc
+    assert 'DateOfPurchase' not in acc
+    assert 'DelinquencyStatus' not in acc
+
+
 def test_test_connection_endpoint(app_server, buildium_mock):
     """POST /api/integrations/buildium/test must return 200 + ok=True
     when creds work. Regression: jsonify(ok=True, **result) collided with

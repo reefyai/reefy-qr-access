@@ -145,6 +145,44 @@ def _unit_id(person):
     return accounts[0].get('UnitId')
 
 
+# Allowlist of Buildium fields kept in external_users.raw_json. Anything
+# not in here is dropped at sync time, so we never persist sensitive
+# fields like TaxId (SSN/EIN), DelinquencyStatus, or EmergencyContact.
+# Minimum-necessary principle: keep only what serves a current or
+# planned qr-access feature; everything else is leak surface.
+RAW_JSON_PERSON_KEYS = {
+    'Id', 'FirstName', 'LastName',
+    'Email', 'AlternateEmail', 'PhoneNumbers',
+    'OccupiesUnit',
+    'CreatedDateTime',
+    'MoveInDate', 'MoveOutDate',  # tenant-only, useful for "active" filtering
+    'Vehicles',                    # kept for upcoming vehicle-access feature
+}
+RAW_JSON_OWNERSHIP_KEYS = {
+    'AssociationId', 'UnitId', 'Status', 'AssociationOwnerIds',
+}
+
+
+def scrub_buildium_payload(person: dict) -> dict:
+    """Return a copy of `person` with only the allowlisted fields.
+
+    Drops sensitive/unused fields like TaxId, DelinquencyStatus,
+    EmergencyContact, BoardMemberTerms, PrimaryAddress, AlternateAddress,
+    MailingPreference, plus per-OwnershipAccount: Comments, DateOfPurchase,
+    DateOfSale, DelinquencyStatus.
+
+    Idempotent - running on already-scrubbed data is a no-op.
+    """
+    out = {k: person[k] for k in RAW_JSON_PERSON_KEYS if k in person}
+    accounts = person.get('OwnershipAccounts') or []
+    if accounts:
+        out['OwnershipAccounts'] = [
+            {k: a[k] for k in RAW_JSON_OWNERSHIP_KEYS if k in a}
+            for a in accounts
+        ]
+    return out
+
+
 def _person_to_common_fields(person, unit_label_by_id, building_name):
     unit_id = _unit_id(person)
     phone1, phone2 = _phones(person)
@@ -158,7 +196,7 @@ def _person_to_common_fields(person, unit_label_by_id, building_name):
         'unit_source_id': str(unit_id) if unit_id else None,
         'unit_label': unit_label_by_id.get(unit_id) if unit_id else None,
         'building': building_name,
-        'raw_json': json.dumps(person, default=str),
+        'raw_json': json.dumps(scrub_buildium_payload(person), default=str),
     }
 
 
