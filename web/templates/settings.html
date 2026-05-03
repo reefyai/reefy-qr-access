@@ -5,110 +5,122 @@
     <h1>Settings</h1>
 </div>
 
-<div class="header-row">
-    <h2>Doors</h2>
-    <button onclick="showAddDoor()">+ Add Door</button>
+<div class="settings-tabs">
+    <button class="settings-tab" data-tab="doors" onclick="showSettingsTab('doors')">Doors</button>
+    <button class="settings-tab" data-tab="integrations" onclick="showSettingsTab('integrations')">Integrations</button>
 </div>
 
-<div id="doors-list">
-    {% for door in doors %}
-    <div class="door-card" id="door-{{ door.id }}">
-        <div class="door-header">
-            <h3>{{ door.name }}</h3>
-            <button class="btn-sm btn-danger" onclick="deleteDoor({{ door.id }}, '{{ door.name }}')">Delete</button>
-        </div>
-        <div class="door-details">
-            <span>Camera: {{ door.camera_uuid or 'Not set' }} <span class="camera-status" id="cam-status-{{ door.name }}"></span></span>
-            <span>Shelly: {{ door.shelly_device_id or 'Not set' }} <button class="btn-sm" onclick="testShelly({{ door.id }})">Test</button> <span id="shelly-status-{{ door.id }}" style="font-size:0.85em;"></span></span>
-        </div>
+<!-- ========================================================== -->
+<!-- DOORS TAB                                                  -->
+<!-- ========================================================== -->
+<section class="settings-pane" data-pane="doors">
+    <div class="header-row">
+        <h2>Doors</h2>
+        <button onclick="showAddDoor()">+ Add Door</button>
     </div>
-    {% endfor %}
-    {% if not doors %}
-    <p class="empty">No doors configured. Scan the network first, then add a door.</p>
-    {% endif %}
-</div>
 
-<div class="header-row" style="margin-top:2rem">
-    <h2>Available Devices</h2>
-    <button onclick="scanNetwork()" id="scan-btn">Scan Network</button>
-</div>
-<div class="two-col">
-    <div class="panel">
-        <h3>Cameras (ONVIF)</h3>
-        <div id="cameras-list">
-            {% if cameras %}
-            {% for cam in cameras %}
-            <div class="device-card" data-uuid="{{ cam.uuid }}" data-ip="{{ cam.ip }}" data-xaddr="{{ cam.xaddr }}" data-rtsp='{{ cam.rtsp_urls | tojson }}'>
-                <strong>{{ cam.name or 'Unknown' }}</strong> ({{ cam.hardware }})
-                <div class="device-detail">{{ cam.ip }} &mdash; {{ cam.uuid }}</div>
-                <div class="rtsp-urls" id="rtsp-{{ cam.uuid }}">
-                    {% if cam.rtsp_urls %}
-                    {% for s in cam.rtsp_urls %}
-                    <div class="device-detail" style="font-size:0.8em;color:#aaa;">{{ s.profile }}: <code>{{ s.url }}</code></div>
-                    {% endfor %}
-                    {% else %}
-                    <button class="btn-sm" onclick="fetchRtsp(this, '{{ cam.ip }}', '{{ cam.xaddr }}', '{{ cam.uuid }}')" style="margin-top:4px;">Fetch RTSP</button>
-                    {% endif %}
+    <div id="doors-list">
+        {% for door in doors %}
+        <div class="door-card" id="door-{{ door.id }}">
+            <div class="door-header">
+                <h3>{{ door.name }}</h3>
+                <button class="btn-sm btn-danger" onclick="deleteDoor({{ door.id }}, '{{ door.name }}')">Delete</button>
+            </div>
+            <div class="door-details">
+                <span>Camera: {{ door.camera_uuid or 'Not set' }} <span class="camera-status" id="cam-status-{{ door.name }}"></span></span>
+                <span>Shelly: {{ door.shelly_device_id or 'Not set' }} <button class="btn-sm" onclick="testShelly({{ door.id }})">Test</button> <span id="shelly-status-{{ door.id }}" style="font-size:0.85em;"></span></span>
+            </div>
+        </div>
+        {% endfor %}
+        {% if not doors %}
+        <p class="empty">No doors configured. Scan the network first, then add a door.</p>
+        {% endif %}
+    </div>
+
+    <div class="header-row" style="margin-top:2rem">
+        <h2>Available Devices</h2>
+        <button onclick="scanNetwork()" id="scan-btn">Scan Network</button>
+    </div>
+    <div class="two-col">
+        <div class="panel">
+            <h3>Cameras (ONVIF)</h3>
+            <div id="cameras-list">
+                {% if cameras %}
+                {% for cam in cameras %}
+                <div class="device-card" data-uuid="{{ cam.uuid }}" data-ip="{{ cam.ip }}" data-xaddr="{{ cam.xaddr }}" data-rtsp='{{ cam.rtsp_urls | tojson }}'>
+                    <strong>{{ cam.name or 'Unknown' }}</strong> ({{ cam.hardware }})
+                    <div class="device-detail">{{ cam.ip }} &mdash; {{ cam.uuid }}</div>
+                    <div class="rtsp-urls" id="rtsp-{{ cam.uuid }}">
+                        {% if cam.rtsp_urls %}
+                        {% for s in cam.rtsp_urls %}
+                        <div class="device-detail" style="font-size:0.8em;color:#aaa;">{{ s.profile }}: <code>{{ s.url }}</code></div>
+                        {% endfor %}
+                        {% else %}
+                        <button class="btn-sm" onclick="fetchRtsp(this, '{{ cam.ip }}', '{{ cam.xaddr }}', '{{ cam.uuid }}')" style="margin-top:4px;">Fetch RTSP</button>
+                        {% endif %}
+                    </div>
                 </div>
+                {% endfor %}
+                {% else %}
+                <p class="empty">No cameras discovered. Click "Scan Network".</p>
+                {% endif %}
             </div>
-            {% endfor %}
-            {% else %}
-            <p class="empty">No cameras discovered. Click "Scan Network".</p>
-            {% endif %}
+        </div>
+
+        <div class="panel">
+            <h3>Shelly Devices (mDNS)</h3>
+            <div id="shellys-list">
+                {% if shellys %}
+                {% for s in shellys %}
+                <div class="device-card">
+                    <strong>{{ s.device_id }}</strong>
+                    <div class="device-detail">{{ s.ip }}</div>
+                </div>
+                {% endfor %}
+                {% else %}
+                <p class="empty">No Shelly devices discovered. Click "Scan Network".</p>
+                {% endif %}
+            </div>
         </div>
     </div>
+</section>
 
+<!-- ========================================================== -->
+<!-- INTEGRATIONS TAB                                           -->
+<!-- ========================================================== -->
+<section class="settings-pane" data-pane="integrations">
     <div class="panel">
-        <h3>Shelly Devices (mDNS)</h3>
-        <div id="shellys-list">
-            {% if shellys %}
-            {% for s in shellys %}
-            <div class="device-card">
-                <strong>{{ s.device_id }}</strong>
-                <div class="device-detail">{{ s.ip }}</div>
+        <h3>Buildium</h3>
+        <p class="device-detail" style="margin-bottom:0.8rem;">
+            Pull residents (owners + tenants) from your Buildium account so you
+            don't have to add them by hand. Re-syncing is safe: existing users are
+            updated, new ones added, and people removed from Buildium are marked
+            inactive (their QR codes are revoked, but the historical record stays).
+        </p>
+
+        <div id="buildium-status" style="margin-bottom:0.8rem;font-size:0.9em;color:#aaa;">
+            Loading status...
+        </div>
+
+        <form id="buildium-form" onsubmit="event.preventDefault(); buildiumSave()">
+            <label>Client ID</label>
+            <input type="text" name="client_id" id="buildium-client-id"
+                   placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off">
+
+            <label>Secret</label>
+            <input type="password" name="client_secret" id="buildium-client-secret"
+                   placeholder="(leave blank to keep saved secret)" autocomplete="off">
+
+            <div style="display:flex;gap:0.5rem;margin-top:0.6rem;">
+                <button type="button" onclick="buildiumTest()">Test connection</button>
+                <button type="submit">Save &amp; Sync</button>
+                <button type="button" id="buildium-sync-btn" onclick="buildiumSync()">Sync now</button>
             </div>
-            {% endfor %}
-            {% else %}
-            <p class="empty">No Shelly devices discovered. Click "Scan Network".</p>
-            {% endif %}
-        </div>
+
+            <div id="buildium-msg" style="margin-top:0.6rem;font-size:0.9em;"></div>
+        </form>
     </div>
-</div>
-
-<div class="header-row" style="margin-top:2rem">
-    <h2>Integrations</h2>
-</div>
-<div class="panel">
-    <h3>Buildium</h3>
-    <p class="device-detail" style="margin-bottom:0.8rem;">
-        Pull residents (owners + tenants) from your Buildium account so you
-        don't have to add them by hand. Re-syncing is safe: existing users are
-        updated, new ones added, and people removed from Buildium are marked
-        inactive (their QR codes are revoked, but the historical record stays).
-    </p>
-
-    <div id="buildium-status" style="margin-bottom:0.8rem;font-size:0.9em;color:#aaa;">
-        Loading status...
-    </div>
-
-    <form id="buildium-form" onsubmit="event.preventDefault(); buildiumSave()">
-        <label>Client ID</label>
-        <input type="text" name="client_id" id="buildium-client-id"
-               placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off">
-
-        <label>Secret</label>
-        <input type="password" name="client_secret" id="buildium-client-secret"
-               placeholder="(leave blank to keep saved secret)" autocomplete="off">
-
-        <div style="display:flex;gap:0.5rem;margin-top:0.6rem;">
-            <button type="button" onclick="buildiumTest()">Test connection</button>
-            <button type="submit">Save &amp; Sync</button>
-            <button type="button" id="buildium-sync-btn" onclick="buildiumSync()">Sync now</button>
-        </div>
-
-        <div id="buildium-msg" style="margin-top:0.6rem;font-size:0.9em;"></div>
-    </form>
-</div>
+</section>
 
 <div style="margin-top:2rem;color:#888;font-size:0.85em;">
     qr-access <span data-testid="app-version">{{ version }}</span>
@@ -117,6 +129,25 @@
 
 {% block scripts %}
 <script>
+// --- Settings tab nav ---
+function showSettingsTab(name) {
+    document.querySelectorAll('.settings-tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.tab === name);
+    });
+    document.querySelectorAll('.settings-pane').forEach(p => {
+        p.classList.toggle('active', p.dataset.pane === name);
+    });
+    if (location.hash !== '#' + name) {
+        history.replaceState(null, '', '#' + name);
+    }
+}
+(function initSettingsTab() {
+    const valid = ['doors', 'integrations'];
+    let tab = location.hash.replace('#', '');
+    if (!valid.includes(tab)) tab = 'doors';
+    showSettingsTab(tab);
+})();
+
 async function scanNetwork() {
     const btn = document.getElementById('scan-btn');
     btn.disabled = true;

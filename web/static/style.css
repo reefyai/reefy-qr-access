@@ -260,6 +260,37 @@ td { font-size: 0.9rem; }
 .user-row-inactive { opacity: 0.5; }
 .user-row-inactive td { color: #888; }
 
+/* Settings tabs */
+.settings-tabs {
+    display: flex;
+    gap: 0.25rem;
+    border-bottom: 1px solid #333;
+    margin-bottom: 1rem;
+}
+.settings-tab {
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    color: #888;
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+    font-size: 0.95rem;
+    font-weight: 500;
+}
+.settings-tab:hover {
+    color: #ccc;
+}
+.settings-tab.active {
+    color: #e0e0e0;
+    border-bottom-color: #4ade80;
+}
+.settings-pane {
+    display: none;
+}
+.settings-pane.active {
+    display: block;
+}
+
 .log-denied { background: #fef5f4; }
 .log-revoked { background: #fdedec; }
 .log-revoked td { color: #c0392b; }

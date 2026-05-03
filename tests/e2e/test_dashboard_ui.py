@@ -35,6 +35,23 @@ def test_settings_shows_version(app_server, page):
         f'expected version starting with v, got {version!r}'
 
 
+def test_settings_tabs_switch_doors_integrations(app_server, page):
+    """Doors tab is visible by default; Integrations tab is reachable
+    via click and via the #integrations URL hash (Playwright deep-links
+    that way for the Buildium tests)."""
+    page.goto(f"{app_server['base_url']}/settings")
+    # Default: Doors pane visible, Integrations hidden
+    assert page.locator('section[data-pane="doors"]').is_visible()
+    assert not page.locator('section[data-pane="integrations"]').is_visible()
+
+    # Click Integrations tab
+    page.locator('button.settings-tab[data-tab="integrations"]').click()
+    assert page.locator('section[data-pane="integrations"]').is_visible()
+    assert not page.locator('section[data-pane="doors"]').is_visible()
+    # URL hash updated for shareability + reload-stickiness
+    assert page.evaluate('location.hash') == '#integrations'
+
+
 def test_dashboard_renders_buildium_badge_and_columns(
         app_server, buildium_mock, page):
     _seed_synced_users(app_server['base_url'])
@@ -74,7 +91,10 @@ def test_dashboard_marks_inactive_after_disappearance(
 
 def test_settings_buildium_form_save_and_sync_via_ui(
         app_server, buildium_mock, page):
-    page.goto(f"{app_server['base_url']}/settings")
+    # The Buildium form lives behind the Integrations tab in the
+    # tabbed Settings layout. Hash routing pre-selects the right pane
+    # so the form is visible/actionable when Playwright finds it.
+    page.goto(f"{app_server['base_url']}/settings#integrations")
     page.locator('#buildium-client-id').fill(CREDS['client_id'])
     page.locator('#buildium-client-secret').fill(CREDS['client_secret'])
     page.get_by_role('button', name='Save & Sync').click()
