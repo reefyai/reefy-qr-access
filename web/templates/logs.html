@@ -2,8 +2,16 @@
 {% block title %}Logs - QR Access{% endblock %}
 {% block content %}
 <div class="header-row">
-    <h1>Access Logs</h1>
+    <h1>Access Logs <span id="logs-total" style="color:#888;font-weight:400;font-size:0.7em;">({{ total }})</span></h1>
     <span class="live-badge" id="live-badge">LIVE</span>
+</div>
+
+<!-- Banner shown when SSE delivers events while admin is on a non-first
+     page (auto-prepending then would be confusing because the row
+     wouldn't belong to the page they're viewing). -->
+<div id="logs-new-banner" style="display:none;background:#1a2a1a;border:1px solid #2d6a2d;color:#86efac;padding:0.5rem 0.8rem;border-radius:6px;margin-bottom:0.6rem;cursor:pointer;"
+     onclick="logsGoToFirstPage()">
+    <span id="logs-new-count">0</span> new event(s) - click to jump to page 1
 </div>
 
 <div class="table-wrap">
@@ -59,6 +67,15 @@
     </tbody>
 </table>
 </div>
+
+<div id="logs-pager" style="display:flex;justify-content:space-between;align-items:center;margin-top:0.8rem;font-size:0.9em;">
+    <div>
+        <button class="btn-sm" id="logs-prev" onclick="logsLoadRel(-1)">&larr; Newer</button>
+        <span id="logs-page-info" style="margin:0 0.6rem;color:#888;">Page 1</span>
+        <button class="btn-sm" id="logs-next" onclick="logsLoadRel(1)">Older &rarr;</button>
+    </div>
+    <div style="color:#888;" id="logs-range"></div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -104,77 +121,141 @@ async function playVideo(url, btn) {
     `);
 }
 
+// --- Logs pagination state ---
+const PAGE_SIZE = {{ page_size }};
+let _logsOffset = 0;
+let _logsTotal = {{ total }};
+let _logsPendingNew = 0;
+
+function _renderRow(e) {
+    const tr = document.createElement('tr');
+    tr.dataset.logId = e.id;
+    const classes = [];
+    if (e.event === 'ACCESS-DENIED') classes.push('log-denied');
+    if (e.token_active === 0 || (!e.full_name && e.event === 'ACCESS-GRANTED')) {
+        classes.push('log-revoked');
+    }
+    tr.className = classes.join(' ');
+    const eventBadge = e.event === 'ACCESS-GRANTED'
+        ? '<span class="badge badge-granted">GRANTED</span>'
+        : '<span class="badge badge-denied">DENIED</span>';
+    let userCell;
+    if (e.full_name) {
+        userCell = e.full_name;
+        if (e.token_active === 0) {
+            userCell += ' <span class="badge badge-revoked">revoked</span>';
+        }
+    } else {
+        userCell = '<span class="unknown-user">Unknown</span>';
+    }
+    let videoCell;
+    if (e.thumbnail_path && e.video_path) {
+        videoCell = `<a href="#" class="event-thumb" onclick="event.preventDefault(); playVideo('/api/video/${e.video_path}', this)">
+            <img src="/api/thumbnail/${e.thumbnail_path}" alt="event" loading="lazy">
+            <span class="play-overlay">&#9654;</span>
+        </a>`;
+    } else if (e.video_path) {
+        videoCell = `<button class="btn-sm" onclick="playVideo('/api/video/${e.video_path}', this)">&#9654; Play</button>`;
+    } else {
+        videoCell = '<span class="no-video">&mdash;</span>';
+    }
+    tr.innerHTML = `
+        <td data-label="Time">${e.timestamp} <span class="time-ago" data-ts="${e.timestamp}"></span></td>
+        <td data-label="Event">${eventBadge}</td>
+        <td data-label="User">${userCell}</td>
+        <td data-label="Token" class="token-cell">${e.token.substring(0, 8)}...</td>
+        <td data-label="Door">${e.door_name}</td>
+        <td data-label="Video">${videoCell}</td>
+    `;
+    return tr;
+}
+
+function _refreshPager() {
+    const totalPages = Math.max(1, Math.ceil(_logsTotal / PAGE_SIZE));
+    const currentPage = Math.floor(_logsOffset / PAGE_SIZE) + 1;
+    document.getElementById('logs-page-info').textContent =
+        `Page ${currentPage} of ${totalPages}`;
+    document.getElementById('logs-prev').disabled = _logsOffset === 0;
+    document.getElementById('logs-next').disabled = _logsOffset + PAGE_SIZE >= _logsTotal;
+    const first = _logsTotal === 0 ? 0 : _logsOffset + 1;
+    const last = Math.min(_logsOffset + PAGE_SIZE, _logsTotal);
+    document.getElementById('logs-range').textContent =
+        _logsTotal === 0 ? '' : `${first}-${last} of ${_logsTotal}`;
+    document.getElementById('logs-total').textContent = `(${_logsTotal})`;
+}
+
+async function logsLoadPage(offset) {
+    const res = await fetch(`/api/access-logs?offset=${offset}&limit=${PAGE_SIZE}`);
+    if (!res.ok) return;
+    const d = await res.json();
+    _logsOffset = d.offset;
+    _logsTotal = d.total;
+    const tbody = document.getElementById('logs-table');
+    tbody.innerHTML = '';
+    if (d.entries.length === 0) {
+        const empty = document.createElement('tr');
+        empty.id = 'empty-row';
+        empty.innerHTML = '<td colspan="6" class="empty">No access events yet.</td>';
+        tbody.appendChild(empty);
+    } else {
+        d.entries.forEach(e => tbody.appendChild(_renderRow(e)));
+    }
+    if (offset === 0) {
+        // Returned to page 1: clear any "new events" banner backlog
+        _logsPendingNew = 0;
+        document.getElementById('logs-new-banner').style.display = 'none';
+    }
+    _refreshPager();
+    updateAgoTimes();
+}
+
+function logsLoadRel(direction) {
+    const next = _logsOffset + direction * PAGE_SIZE;
+    if (next < 0 || next >= _logsTotal) return;
+    logsLoadPage(next);
+}
+
+function logsGoToFirstPage() {
+    logsLoadPage(0);
+}
+
 (function() {
-    const table = document.getElementById('logs-table');
     const badge = document.getElementById('live-badge');
-    const emptyRow = document.getElementById('empty-row');
-
     const evtSource = new EventSource('/api/logs/stream');
-
     evtSource.onmessage = function(event) {
         const e = JSON.parse(event.data);
-        if (emptyRow) emptyRow.remove();
-
-        const tr = document.createElement('tr');
-        tr.dataset.logId = e.id;
-
-        const classes = [];
-        if (e.event === 'ACCESS-DENIED') classes.push('log-denied');
-        if (e.token_active === 0 || (!e.full_name && e.event === 'ACCESS-GRANTED')) {
-            classes.push('log-revoked');
-        }
-        tr.className = classes.join(' ');
-
-        const eventBadge = e.event === 'ACCESS-GRANTED'
-            ? '<span class="badge badge-granted">GRANTED</span>'
-            : '<span class="badge badge-denied">DENIED</span>';
-
-        let userCell;
-        if (e.full_name) {
-            userCell = e.full_name;
-            if (e.token_active === 0) {
-                userCell += ' <span class="badge badge-revoked">revoked</span>';
+        _logsTotal += 1;
+        if (_logsOffset === 0) {
+            // Page 1: prepend live + drop the bottom row to keep the page bounded.
+            const emptyRow = document.getElementById('empty-row');
+            if (emptyRow) emptyRow.remove();
+            const tbody = document.getElementById('logs-table');
+            const tr = _renderRow(e);
+            tbody.insertBefore(tr, tbody.firstChild);
+            tr.classList.add('log-new');
+            setTimeout(() => tr.classList.remove('log-new'), 2000);
+            while (tbody.children.length > PAGE_SIZE) {
+                tbody.removeChild(tbody.lastChild);
             }
         } else {
-            userCell = '<span class="unknown-user">Unknown</span>';
+            // Non-first page: don't disturb the view; show banner.
+            _logsPendingNew += 1;
+            const banner = document.getElementById('logs-new-banner');
+            document.getElementById('logs-new-count').textContent = _logsPendingNew;
+            banner.style.display = 'block';
         }
-
-        let videoCell;
-        if (e.thumbnail_path && e.video_path) {
-            videoCell = `<a href="#" class="event-thumb" onclick="event.preventDefault(); playVideo('/api/video/${e.video_path}', this)">
-                <img src="/api/thumbnail/${e.thumbnail_path}" alt="event">
-                <span class="play-overlay">&#9654;</span>
-            </a>`;
-        } else if (e.video_path) {
-            videoCell = `<button class="btn-sm" onclick="playVideo('/api/video/${e.video_path}', this)">&#9654; Play</button>`;
-        } else {
-            videoCell = '<span class="no-video">—</span>';
-        }
-
-        tr.innerHTML = `
-            <td data-label="Time">${e.timestamp} <span class="time-ago" data-ts="${e.timestamp}"></span></td>
-            <td data-label="Event">${eventBadge}</td>
-            <td data-label="User">${userCell}</td>
-            <td data-label="Token" class="token-cell">${e.token.substring(0, 8)}...</td>
-            <td data-label="Door">${e.door_name}</td>
-            <td data-label="Video">${videoCell}</td>
-        `;
-
-        table.insertBefore(tr, table.firstChild);
-
-        tr.classList.add('log-new');
-        setTimeout(() => tr.classList.remove('log-new'), 2000);
+        _refreshPager();
     };
-
     evtSource.onerror = function() {
         badge.textContent = 'DISCONNECTED';
         badge.classList.add('badge-disconnected');
     };
-
     evtSource.onopen = function() {
         badge.textContent = 'LIVE';
         badge.classList.remove('badge-disconnected');
     };
+    // Initial pager state.
+    _refreshPager();
 })();
 
 function formatAgo(ts) {

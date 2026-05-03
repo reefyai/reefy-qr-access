@@ -71,11 +71,35 @@ def dashboard():
     return render_template('dashboard.html', users=users)
 
 
+LOGS_PAGE_SIZE = 50
+
+
 @app.route('/logs')
 @login_required
 def logs():
-    entries = db.get_access_logs(limit=200)
-    return render_template('logs.html', entries=entries)
+    entries = db.get_access_logs(limit=LOGS_PAGE_SIZE, offset=0)
+    total = db.count_access_logs()
+    return render_template('logs.html', entries=entries,
+                           total=total, page_size=LOGS_PAGE_SIZE)
+
+
+@app.route('/api/access-logs')
+@login_required
+def api_access_logs():
+    """Paginated access log feed for the Logs page's pager. Default
+    offset=0 (page 1 = newest); limit clamped to 200 to bound DB +
+    transfer cost on misconfigured clients."""
+    try:
+        offset = max(int(request.args.get('offset', 0)), 0)
+        limit = min(max(int(request.args.get('limit', LOGS_PAGE_SIZE)), 1), 200)
+    except (ValueError, TypeError):
+        return jsonify(error='invalid offset/limit'), 400
+    return jsonify(
+        entries=db.get_access_logs(limit=limit, offset=offset),
+        total=db.count_access_logs(),
+        offset=offset,
+        limit=limit,
+    )
 
 
 @app.route('/api/logs/stream')

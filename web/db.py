@@ -452,8 +452,9 @@ def log_access(door_name, token, event, video_path=None, thumbnail_path=None):
     return _write(op)
 
 
-def get_access_logs(limit=200):
-    """Get recent access logs joined with user/token info."""
+def get_access_logs(limit=200, offset=0):
+    """Get a page of recent access logs joined with user/token info.
+    DESC by id (newest first). Default offset=0 = first page."""
     db = get_db()
     rows = db.execute("""
         SELECT
@@ -470,9 +471,14 @@ def get_access_logs(limit=200):
         LEFT JOIN tokens ON access_log.token = tokens.token
         LEFT JOIN users ON tokens.user_id = users.id
         ORDER BY access_log.id DESC
-        LIMIT ?
-    """, (limit,)).fetchall()
+        LIMIT ? OFFSET ?
+    """, (limit, offset)).fetchall()
     return [dict(r) for r in rows]
+
+
+def count_access_logs():
+    db = get_db()
+    return db.execute("SELECT COUNT(*) AS n FROM access_log").fetchone()['n']
 
 
 def get_access_logs_since(last_id):
