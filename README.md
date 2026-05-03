@@ -7,6 +7,21 @@ local user database, and triggers a Shelly relay to unlock the door.
 Ships as a single container with a Flask admin UI (user/token management,
 camera + door config, live access log, optional Buildium resident sync).
 
+## Why QR codes?
+
+QR codes hit the best balance between convenience, security, and cost
+across the common access methods - quick comparison below.
+
+| Option | Convenience / Traceability / Pros / Cons / Security / Cost |
+|---|---|
+| **Physical key** | **Convenience:** Medium<br>**Traceability:** Low. Usually no record unless paired with camera.<br>**Pros:** Cheap, simple, works without power.<br>**Cons:** Hard to revoke, can be copied/lost, no audit log.<br>**Security:** Low<br>**Cost:** Low |
+| **PIN code** | **Convenience:** High<br>**Traceability:** Low to medium. Can log code use if each user has a unique PIN; weak if shared.<br>**Pros:** Easy to use, no card or app needed.<br>**Cons:** Code gets shared, weak identity proof, needs periodic changes.<br>**Security:** Low to medium<br>**Cost:** Low |
+| **QR code per resident + video recording** | **Convenience:** High. Can be used from phone, printed card, sticker, or keychain.<br>**Traceability:** High. QR identifies which credential was used; video shows who physically entered.<br>**Pros:** Strong defense in depth, easy to issue/revoke, works well for residents, guests, vendors, kids, and elderly residents. Good access history when paired with logs and camera footage.<br>**Cons:** Static QR can be copied or photographed. Needs camera, scanner, logging, and clear policy for abuse/revocation.<br>**Security:** Medium to high<br>**Cost:** Medium |
+| **RFID key fob / card** | **Convenience:** Medium. Tap is easy, but residents must carry a physical item.<br>**Traceability:** Medium to high. Logs which fob/card opened the door; stronger with camera.<br>**Pros:** Fast tap access, reliable, easy to revoke, supports audit logs.<br>**Cons:** Requires carrying a physical item, can be forgotten/lost/shared, replacement management needed.<br>**Security:** Medium to high<br>**Cost:** Medium |
+| **Mobile app / NFC** | **Convenience:** Medium to high. Most residents already carry phones, but app setup can be annoying.<br>**Traceability:** High. Logs user/device, time, and door; stronger with camera.<br>**Pros:** No separate fob/card, easy to revoke, good audit logs.<br>**Cons:** App setup friction, phone battery dependency, vendor lock-in.<br>**Security:** High<br>**Cost:** Medium to high |
+| **Video intercom** | **Convenience:** Medium. Good for visitors, slower for daily resident access.<br>**Traceability:** High. Can record visitor video/audio, call history, unlock event, and resident/guard approval.<br>**Pros:** Visitor verification, remote unlock, useful for deliveries and unexpected guests.<br>**Cons:** More expensive, slower than credential-based access, not ideal as the only resident access method.<br>**Security:** Medium to high<br>**Cost:** High |
+| **Biometric access** | **Convenience:** Medium to high. Nothing to carry, but enrollment and privacy concerns reduce adoption.<br>**Traceability:** High. Logs exact enrolled user and entry time.<br>**Pros:** Hard to share credentials, no key/fob/phone needed.<br>**Cons:** Privacy concerns, enrollment and maintenance overhead.<br>**Security:** High<br>**Cost:** High |
+
 ## Architecture
 
 ```
