@@ -21,15 +21,15 @@
     <tbody id="logs-table">
         {% for e in entries %}
         <tr class="{{ 'log-denied' if e.event == 'ACCESS-DENIED' else '' }} {{ 'log-revoked' if e.token_active == 0 or (e.full_name is none and e.event == 'ACCESS-GRANTED') else '' }}" data-log-id="{{ e.id }}">
-            <td>{{ e.timestamp }} <span class="time-ago" data-ts="{{ e.timestamp }}"></span></td>
-            <td>
+            <td data-label="Time">{{ e.timestamp }} <span class="time-ago" data-ts="{{ e.timestamp }}"></span></td>
+            <td data-label="Event">
                 {% if e.event == 'ACCESS-GRANTED' %}
                 <span class="badge badge-granted">GRANTED</span>
                 {% else %}
                 <span class="badge badge-denied">DENIED</span>
                 {% endif %}
             </td>
-            <td>
+            <td data-label="User">
                 {% if e.full_name %}
                     {{ e.full_name }}
                     {% if e.token_active == 0 %}<span class="badge badge-revoked">revoked</span>{% endif %}
@@ -37,9 +37,9 @@
                     <span class="unknown-user">Unknown</span>
                 {% endif %}
             </td>
-            <td class="token-cell">{{ e.token[:8] }}...</td>
-            <td>{{ e.door_name }}</td>
-            <td>
+            <td data-label="Token" class="token-cell">{{ e.token[:8] }}...</td>
+            <td data-label="Door">{{ e.door_name }}</td>
+            <td data-label="Video">
                 {% if e.video_path %}
                 <button class="btn-sm" onclick="playVideo('/api/video/{{ e.video_path }}', this)">&#9654; Play</button>
                 {% else %}
@@ -139,12 +139,12 @@ async function playVideo(url, btn) {
             : '<span class="no-video">—</span>';
 
         tr.innerHTML = `
-            <td>${e.timestamp} <span class="time-ago" data-ts="${e.timestamp}"></span></td>
-            <td>${eventBadge}</td>
-            <td>${userCell}</td>
-            <td class="token-cell">${e.token.substring(0, 8)}...</td>
-            <td>${e.door_name}</td>
-            <td>${videoCell}</td>
+            <td data-label="Time">${e.timestamp} <span class="time-ago" data-ts="${e.timestamp}"></span></td>
+            <td data-label="Event">${eventBadge}</td>
+            <td data-label="User">${userCell}</td>
+            <td data-label="Token" class="token-cell">${e.token.substring(0, 8)}...</td>
+            <td data-label="Door">${e.door_name}</td>
+            <td data-label="Video">${videoCell}</td>
         `;
 
         table.insertBefore(tr, table.firstChild);

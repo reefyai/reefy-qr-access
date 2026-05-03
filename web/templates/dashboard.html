@@ -31,15 +31,15 @@ Internal
         {% for user in users %}
         {% set src = source_label(user) %}
         <tr id="user-{{ user.id }}"{% if user.is_active == 0 %} class="user-row-inactive"{% endif %}>
-            <td><span class="badge badge-source-{{ src.lower() }}">{{ src }}</span></td>
-            <td>
+            <td data-label="Source"><span class="badge badge-source-{{ src.lower() }}">{{ src }}</span></td>
+            <td data-label="Name">
                 {{ user.full_name }}
                 {% if user.is_active == 0 %}<small style="color:#888">(inactive)</small>{% endif %}
             </td>
-            <td>{{ user.email or '' }}</td>
-            <td>{{ user.phone_primary or '' }}</td>
-            <td>{{ user.unit_label or user.address or '' }}</td>
-            <td>{{ user.created_at[:10] }}</td>
+            <td data-label="Email">{{ user.email or '' }}</td>
+            <td data-label="Phone">{{ user.phone_primary or '' }}</td>
+            <td data-label="Unit">{{ user.unit_label or user.address or '' }}</td>
+            <td data-label="Created">{{ user.created_at[:10] }}</td>
             <td class="actions">
                 <button class="btn-sm" onclick="showTokens({{ user.id }}, '{{ user.full_name }}')">QR Codes</button>
                 <button class="btn-sm btn-danger" onclick="deleteUser({{ user.id }}, '{{ user.full_name }}')">Delete</button>
@@ -120,12 +120,12 @@ async function addUser(form) {
     // Unit/Created/Actions). Manual users render as Internal source; unit
     // column shows the free-form address since they have no Buildium unit.
     row.innerHTML = `
-        <td><span class="badge badge-source-internal">Internal</span></td>
-        <td>${u.full_name}</td>
-        <td>${u.email || ''}</td>
-        <td>${u.phone || ''}</td>
-        <td>${u.address || ''}</td>
-        <td>${u.created_at.substring(0, 10)}</td>
+        <td data-label="Source"><span class="badge badge-source-internal">Internal</span></td>
+        <td data-label="Name">${u.full_name}</td>
+        <td data-label="Email">${u.email || ''}</td>
+        <td data-label="Phone">${u.phone || ''}</td>
+        <td data-label="Unit">${u.address || ''}</td>
+        <td data-label="Created">${u.created_at.substring(0, 10)}</td>
         <td class="actions">
             <button class="btn-sm" onclick="showTokens(${u.id}, '${esc}')">QR Codes</button>
             <button class="btn-sm btn-danger" onclick="deleteUser(${u.id}, '${esc}')">Delete</button>
@@ -159,9 +159,16 @@ async function showTokens(userId, name) {
     const data = await res.json();
     const cards = buildTokenCards(data.tokens, userId, name);
 
-    // If modal already open for this user, just refresh the cards
+    // If modal already open for this user, just refresh the cards.
+    // Important: also check the modal is actually visible - the inner
+    // HTML hangs around in the DOM after closeModal() (which only
+    // hides the overlay), so without the visibility check, a second
+    // click on the same user would silently re-render into a hidden
+    // container and never re-open the modal.
+    const overlay = document.getElementById('modal-overlay');
+    const modalOpen = overlay && overlay.style.display !== 'none';
     const existing = document.getElementById('qr-cards-container');
-    if (existing && existing.dataset.userId == userId) {
+    if (modalOpen && existing && existing.dataset.userId == userId) {
         existing.innerHTML = cards;
         return;
     }
