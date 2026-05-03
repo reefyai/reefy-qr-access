@@ -13,28 +13,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# GPU deps — --no-cache-dir saves ~3GB
-# Removed: onnx, onnxslim, onnxruntime-gpu (not used at runtime)
-# Removed: libavcodec-dev/libavformat-dev/libswscale-dev (build headers not needed)
+# Layers below are ordered most-stable -> most-volatile so a typical
+# version bump only invalidates the small layers near the bottom.
+# Devices then pull a few hundred kB instead of the full ~6.7 GB
+# torch/tensorrt blob each time.
+
+# Heavyweight + stable: torch + tensorrt are the bulk of the image.
 RUN pip3 install --break-system-packages --no-cache-dir \
+    torch \
+    tensorrt
+
+# ML pipeline (mid-weight, changes occasionally).
+RUN pip3 install --break-system-packages --no-cache-dir \
+    ultralytics \
     opencv-python-headless \
+    numpy
+
+# QR detection / decoding (small, changes rarely).
+RUN pip3 install --break-system-packages --no-cache-dir \
     pyzbar \
     qrdet \
-    ultralytics \
-    numpy \
-    tensorrt \
-    torch \
     zxing-cpp \
-    deqr \
-    psutil
+    deqr
 
-# Lighter deps
+# Web + utility deps (small; most likely place for additions).
 RUN pip3 install --break-system-packages --no-cache-dir \
+    flask \
+    requests \
+    qrcode \
     zeroconf \
     pyyaml \
-    requests \
-    flask \
-    qrcode
+    psutil
 
 # Persistent model cache
 ENV MODEL_CACHE=/models
