@@ -65,6 +65,8 @@ function showAddUser() {
             <input type="text" name="full_name" placeholder="John Doe" required autofocus>
             <label>Email</label>
             <input type="email" name="email" placeholder="john@example.com" required>
+            <label>Phone</label>
+            <input type="tel" name="phone" placeholder="(555) 555-0100">
             <label>Address</label>
             <input type="text" name="address" placeholder="123 Main St, Apt 4B">
             <button type="submit">Create User</button>
@@ -90,6 +92,7 @@ async function addUser(form) {
             body: JSON.stringify({
                 full_name: form.full_name.value,
                 email: form.email.value,
+                phone: form.phone.value,
                 address: form.address.value,
             }),
         });
@@ -113,10 +116,15 @@ async function addUser(form) {
     const row = document.createElement('tr');
     row.id = `user-${u.id}`;
     const esc = u.full_name.replace(/'/g, "\\'");
+    // Match the 7-column server-rendered layout (Source/Name/Email/Phone/
+    // Unit/Created/Actions). Manual users render as Internal source; unit
+    // column shows the free-form address since they have no Buildium unit.
     row.innerHTML = `
+        <td><span class="badge badge-source-internal">Internal</span></td>
         <td>${u.full_name}</td>
-        <td>${u.email}</td>
-        <td>${u.address}</td>
+        <td>${u.email || ''}</td>
+        <td>${u.phone || ''}</td>
+        <td>${u.address || ''}</td>
         <td>${u.created_at.substring(0, 10)}</td>
         <td class="actions">
             <button class="btn-sm" onclick="showTokens(${u.id}, '${esc}')">QR Codes</button>

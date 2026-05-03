@@ -139,13 +139,14 @@ def api_create_user():
     data = request.get_json()
     full_name = data.get('full_name', '').strip()
     email = data.get('email', '').strip()
+    phone = data.get('phone', '').strip() or None
     address = data.get('address', '').strip()
 
     if not full_name or not email:
         return jsonify(error='Name and email are required'), 400
 
     try:
-        user_id = db.create_user(full_name, email, address)
+        user_id = db.create_user(full_name, email, address, phone=phone)
     except Exception as e:
         err = str(e)
         if 'UNIQUE' in err and 'email' in err:
@@ -154,10 +155,8 @@ def api_create_user():
             return jsonify(error='Database busy, please try again.'), 503
         return jsonify(error=err), 400
 
-    # Create initial token
-    token = create_token()
-    db.create_token_for_user(user_id, token, comment='auto-created with user')
-    generate_qr_png(token)
+    from .services.users import issue_initial_token
+    issue_initial_token(user_id)
 
     _try_export_config()
     return jsonify(user=db.get_user(user_id)), 201
@@ -521,8 +520,11 @@ def api_buildium_status():
 def api_buildium_save():
     from .services.buildium import BuildiumClient, BuildiumError
     data = request.get_json() or {}
+    saved = db.get_setting('buildium.config') or {}
     client_id = (data.get('client_id') or '').strip()
-    client_secret = (data.get('client_secret') or '').strip()
+    # Empty/omitted secret means "keep the saved one" - lets the admin
+    # re-test or change Client ID without re-pasting the secret.
+    client_secret = (data.get('client_secret') or '').strip() or saved.get('client_secret', '')
     base_url = (data.get('base_url') or '').strip() or DEFAULT_BUILDIUM_BASE_URL
 
     if not client_id or not client_secret:
@@ -565,7 +567,8 @@ def api_buildium_test():
         return jsonify(error=str(e)), 400
     except Exception as e:
         return jsonify(error=f'Connection failed: {e}'), 500
-    return jsonify(ok=True, **result)
+    # result already carries ok=True from BuildiumClient.test_connection()
+    return jsonify(**result)
 
 
 @app.route('/api/integrations/buildium/sync', methods=['POST'])

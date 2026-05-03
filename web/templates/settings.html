@@ -87,13 +87,11 @@
         inactive (their QR codes are revoked, but the historical record stays).
     </p>
 
-    <form id="buildium-form" onsubmit="event.preventDefault(); buildiumSave()">
-        <label>Base URL</label>
-        <select name="base_url" id="buildium-base-url">
-            <option value="https://api.buildium.com/v1">Production (api.buildium.com)</option>
-            <option value="https://apisandbox.buildium.com/v1">Sandbox (apisandbox.buildium.com)</option>
-        </select>
+    <div id="buildium-status" style="margin-bottom:0.8rem;font-size:0.9em;color:#aaa;">
+        Loading status...
+    </div>
 
+    <form id="buildium-form" onsubmit="event.preventDefault(); buildiumSave()">
         <label>Client ID</label>
         <input type="text" name="client_id" id="buildium-client-id"
                placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off">
@@ -110,14 +108,10 @@
 
         <div id="buildium-msg" style="margin-top:0.6rem;font-size:0.9em;"></div>
     </form>
-
-    <div id="buildium-status" style="margin-top:1rem;font-size:0.9em;color:#aaa;">
-        Loading status...
-    </div>
 </div>
 
 <div style="margin-top:2rem;color:#888;font-size:0.85em;">
-    qr-access <span data-testid="app-version">v{{ version }}</span>
+    qr-access <span data-testid="app-version">{{ version }}</span>
 </div>
 {% endblock %}
 
@@ -148,7 +142,7 @@ function buildiumFormPayload() {
     return {
         client_id: document.getElementById('buildium-client-id').value.trim(),
         client_secret: document.getElementById('buildium-client-secret').value.trim(),
-        base_url: document.getElementById('buildium-base-url').value,
+        // Sandbox is intentionally not exposed; backend defaults to prod when omitted.
     };
 }
 
@@ -165,25 +159,29 @@ async function buildiumLoadStatus() {
     const d = await res.json();
     const el = document.getElementById('buildium-status');
     if (!d.configured) {
-        el.textContent = 'Not configured. Enter Client ID + Secret above and Save & Sync.';
+        el.innerHTML = '<div style="color:#aaa;">Not configured yet. Enter Client ID + Secret below and click Save &amp; Sync.</div>';
         return;
     }
-    let html = `<div>Status: configured (client …${d.client_id_tail || '????'}, ${d.base_url})</div>`;
+    let html = '<div style="padding:0.6rem 0.8rem;background:#0f1f0f;border:1px solid #2d6a2d;border-radius:6px;color:#86efac;">';
+    html += `<strong>✓ Connected</strong> &nbsp; <span style="color:#9bd6a0;font-size:0.85em;">client …${d.client_id_tail || '????'}</span>`;
     if (d.last_sync) {
         const at = d.last_sync.at || '';
         const counts = fmtSyncCounts(d.last_sync.counts);
-        html += `<div>Last sync: ${at} · ${counts}</div>`;
+        html += `<div style="margin-top:0.3rem;color:#9bd6a0;font-size:0.85em;">Last sync: ${at} · ${counts}</div>`;
         const errs = (d.last_sync.counts && d.last_sync.counts.errors) || [];
         if (errs.length) {
-            html += `<div style="color:#ef4444">Errors: ${errs.join('; ')}</div>`;
+            html += `<div style="color:#ef4444;font-size:0.85em;">Errors: ${errs.join('; ')}</div>`;
         }
     } else {
-        html += '<div>No sync yet.</div>';
+        html += '<div style="margin-top:0.3rem;color:#9bd6a0;font-size:0.85em;">No sync yet - click Sync now.</div>';
     }
-    // Pre-fill the base_url select to whatever's saved.
-    const sel = document.getElementById('buildium-base-url');
-    if (d.base_url) sel.value = d.base_url;
+    html += '</div>';
     el.innerHTML = html;
+    // Pre-fill the Client ID for editing context (it's an identifier, not a secret).
+    const cid = document.getElementById('buildium-client-id');
+    if (cid && !cid.value && d.client_id_tail) {
+        cid.placeholder = `…${d.client_id_tail} (saved)`;
+    }
 }
 
 async function buildiumTest() {
@@ -200,8 +198,13 @@ async function buildiumTest() {
 
 async function buildiumSave() {
     const payload = buildiumFormPayload();
-    if (!payload.client_id || !payload.client_secret) {
-        buildiumMsg('Client ID and Secret are required', 'error'); return;
+    if (!payload.client_id) {
+        buildiumMsg('Client ID is required', 'error'); return;
+    }
+    // Secret can be omitted if we have one saved already (the backend
+    // falls back to the persisted secret in that case).
+    if (!payload.client_secret) {
+        delete payload.client_secret;
     }
     buildiumMsg('Saving…');
     const res = await fetch('/api/integrations/buildium', {

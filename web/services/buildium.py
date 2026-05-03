@@ -261,12 +261,17 @@ def run_sync(client: BuildiumClient) -> dict:
 
             user = db.find_user_by_external(ext_id)
             if user is None:
-                db.create_user_from_external(
+                new_user_id = db.create_user_from_external(
                     external_user_id=ext_id,
                     full_name=_full_name(fields),
                     email=fields['email'],
                     address=_user_address(fields),
                     created_via='sync:buildium')
+                # Issue an initial QR token so synced residents are
+                # scan-ready without an extra admin click. Same helper
+                # the manual /api/users route uses.
+                from .users import issue_initial_token
+                issue_initial_token(new_user_id, comment='auto-created via Buildium sync')
                 counts['users']['created'] += 1
             elif reactivated and user.get('is_active') == 0:
                 db.set_user_active(user['id'], True)

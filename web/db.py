@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     full_name TEXT NOT NULL,
     email TEXT,
+    phone TEXT,
     address TEXT NOT NULL DEFAULT '',
     external_user_id INTEGER REFERENCES external_users(id),
     is_active INTEGER NOT NULL DEFAULT 1,
@@ -52,9 +53,6 @@ CREATE TABLE IF NOT EXISTS external_users (
     last_synced_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (source, source_kind, source_id)
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_external_user_id
-    ON users(external_user_id) WHERE external_user_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
@@ -165,6 +163,7 @@ def init_db():
         db.execute("ALTER TABLE cameras ADD COLUMN rtsp_urls TEXT NOT NULL DEFAULT '[]'")
 
     # Migrate users table: add columns introduced for external-source sync.
+    # Must run BEFORE the index below, which references external_user_id.
     user_cols = [r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()]
     if 'external_user_id' not in user_cols:
         db.execute("ALTER TABLE users ADD COLUMN external_user_id INTEGER REFERENCES external_users(id)")
@@ -172,6 +171,16 @@ def init_db():
         db.execute("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
     if 'created_via' not in user_cols:
         db.execute("ALTER TABLE users ADD COLUMN created_via TEXT NOT NULL DEFAULT 'manual'")
+    if 'phone' not in user_cols:
+        db.execute("ALTER TABLE users ADD COLUMN phone TEXT")
+
+    # Index lives outside SCHEMA so it runs after the column-add migration
+    # (CREATE TABLE IF NOT EXISTS is a no-op on pre-existing tables, so the
+    # column the index needs may not exist yet at SCHEMA-execute time).
+    db.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_external_user_id
+            ON users(external_user_id) WHERE external_user_id IS NOT NULL
+    """)
 
     db.commit()
 
@@ -200,11 +209,11 @@ def _write(fn):
         raise
 
 
-def create_user(full_name, email, address):
+def create_user(full_name, email, address, phone=None):
     def op(db):
         db.execute(
-            "INSERT INTO users (full_name, email, address) VALUES (?,?,?)",
-            (full_name, email, address))
+            "INSERT INTO users (full_name, email, address, phone) VALUES (?,?,?,?)",
+            (full_name, email, address, phone or None))
         return db.execute("SELECT last_insert_rowid()").fetchone()[0]
     return _write(op)
 
@@ -214,7 +223,8 @@ def get_users():
     rows = db.execute("""
         SELECT u.id, u.full_name, u.email, u.address, u.is_active,
                u.created_via, u.external_user_id, u.created_at,
-               eu.unit_label, eu.building, eu.phone_primary,
+               COALESCE(u.phone, eu.phone_primary) AS phone_primary,
+               eu.unit_label, eu.building,
                eu.alternate_email, eu.source AS external_source,
                eu.source_kind AS external_source_kind,
                eu.is_active_at_source
