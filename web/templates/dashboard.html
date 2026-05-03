@@ -6,6 +6,12 @@
     <button onclick="showAddUser()">+ Add User</button>
 </div>
 
+<div style="margin-bottom:0.6rem;">
+    <input id="users-filter" type="search" placeholder="Filter by name, email, phone, address..."
+           oninput="filterUsers()"
+           style="width:100%;max-width:480px;padding:0.45rem 0.6rem;background:#fff;border:1px solid #ddd;border-radius:4px;font-size:0.9rem;">
+</div>
+
 {% macro source_label(user) -%}
 {%- if user.created_via and user.created_via.startswith('sync:') -%}
 {{ user.created_via[5:]|capitalize }}
@@ -247,9 +253,26 @@ function deleteUser(userId, name) {
 }
 
 function updateUsersCount() {
-    const n = document.querySelectorAll('#users-table tr[id^="user-"]').length;
+    // Visible (filter-matching) row count when filter active, else total.
+    const all = document.querySelectorAll('#users-table tr[id^="user-"]');
+    const visible = Array.from(all).filter(tr => tr.style.display !== 'none').length;
     const el = document.getElementById('users-count');
-    if (el) el.textContent = `(${n})`;
+    if (!el) return;
+    el.textContent = visible === all.length
+        ? `(${all.length})`
+        : `(${visible} / ${all.length})`;
+}
+
+function filterUsers() {
+    const q = document.getElementById('users-filter').value.trim().toLowerCase();
+    document.querySelectorAll('#users-table tr[id^="user-"]').forEach(tr => {
+        // Simple substring match against the row's combined text. Catches
+        // name, email, phone, unit, address, anything in cells. Skipping
+        // .actions cells would complicate the match for tiny benefit.
+        const hay = tr.textContent.toLowerCase();
+        tr.style.display = (!q || hay.includes(q)) ? '' : 'none';
+    });
+    updateUsersCount();
 }
 
 // --- Email QR ---
