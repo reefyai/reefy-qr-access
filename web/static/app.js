@@ -57,3 +57,40 @@ function closeModal() {
 document.addEventListener('keydown', e => {
     if (e.key === 'Escape') closeModal();
 });
+
+// Help-popover system: any element with class="help" + data-help opens
+// a single anchored popover on click. Click again (or anywhere outside)
+// to dismiss. Keep markup minimal - just sprinkle <button class="help"
+// data-help="..."> next to a section title and you're done.
+(function() {
+    let _helpPop = null;
+    function close() {
+        if (_helpPop) { _helpPop.remove(); _helpPop = null; }
+    }
+    document.addEventListener('click', function(e) {
+        const trigger = e.target.closest('.help');
+        if (trigger) {
+            e.stopPropagation();
+            const wasOpen = _helpPop && _helpPop.dataset.anchor === trigger.dataset.help;
+            close();
+            if (wasOpen) return;
+            const pop = document.createElement('div');
+            pop.className = 'help-popover';
+            pop.textContent = trigger.dataset.help || '';
+            pop.dataset.anchor = trigger.dataset.help || '';
+            document.body.appendChild(pop);
+            const rect = trigger.getBoundingClientRect();
+            const top = rect.bottom + window.scrollY + 6;
+            // Clamp horizontally so the popover stays in the viewport.
+            const maxLeft = window.innerWidth - pop.offsetWidth - 12;
+            pop.style.left = Math.min(rect.left + window.scrollX, maxLeft) + 'px';
+            pop.style.top = top + 'px';
+            _helpPop = pop;
+        } else if (_helpPop && !e.target.closest('.help-popover')) {
+            close();
+        }
+    });
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') close();
+    });
+})();

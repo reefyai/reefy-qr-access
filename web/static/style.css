@@ -281,7 +281,8 @@ td { font-size: 0.9rem; }
     color: #ccc;
 }
 .settings-tab.active {
-    color: #e0e0e0;
+    color: #fff;
+    font-weight: 600;
     border-bottom-color: #4ade80;
 }
 .settings-pane {
@@ -289,6 +290,44 @@ td { font-size: 0.9rem; }
 }
 .settings-pane.active {
     display: block;
+}
+
+/* Help system: small "?" trigger + anchored popover. Use anywhere by
+   adding <button class="help" data-help="...">?</button>. */
+.help {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border-radius: 50%;
+    background: #2a2a2a;
+    color: #aaa;
+    border: 1px solid #444;
+    font-size: 0.7rem;
+    line-height: 1;
+    cursor: pointer;
+    margin-left: 0.4rem;
+    vertical-align: middle;
+}
+.help:hover {
+    background: #333;
+    color: #fff;
+    border-color: #666;
+}
+.help-popover {
+    position: absolute;
+    background: #1a1a1a;
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 0.7rem 0.9rem;
+    color: #ccc;
+    font-size: 0.85rem;
+    line-height: 1.45;
+    max-width: 320px;
+    z-index: 200;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.55);
 }
 
 .log-denied { background: #fef5f4; }

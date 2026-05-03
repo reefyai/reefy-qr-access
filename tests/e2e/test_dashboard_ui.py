@@ -35,6 +35,25 @@ def test_settings_shows_version(app_server, page):
         f'expected version starting with v, got {version!r}'
 
 
+def test_help_popover_opens_and_closes(app_server, page):
+    """Click "?" next to Buildium heading -> popover with the long
+    description appears. Click outside -> popover dismisses."""
+    page.goto(f"{app_server['base_url']}/settings#integrations")
+    # No popover initially
+    assert page.locator('.help-popover').count() == 0
+    # Click the help trigger
+    page.locator('.panel button.help').first.click()
+    pop = page.locator('.help-popover')
+    pop.wait_for(state='visible', timeout=2000)
+    text = pop.text_content() or ''
+    assert 'Pull residents' in text
+    # Click somewhere else -> dismisses
+    page.locator('h1').click()
+    page.wait_for_function(
+        "() => document.querySelectorAll('.help-popover').length === 0",
+        timeout=2000)
+
+
 def test_settings_tabs_switch_doors_integrations(app_server, page):
     """Doors tab is visible by default; Integrations tab is reachable
     via click and via the #integrations URL hash (Playwright deep-links
