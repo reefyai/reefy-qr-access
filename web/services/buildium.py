@@ -187,6 +187,7 @@ def run_sync(client: BuildiumClient) -> dict:
         'external_users': {'created': 0, 'updated': 0,
                            'inactivated': 0, 'reactivated': 0},
         'users': {'created': 0, 'reactivated': 0, 'inactivated': 0},
+        'tokens_issued': 0,
         'tokens_revoked': 0,
         'associations': 0,
         'rentals': 0,
@@ -259,23 +260,33 @@ def run_sync(client: BuildiumClient) -> dict:
                 if reactivated:
                     counts['external_users']['reactivated'] += 1
 
+            from .users import issue_initial_token
             user = db.find_user_by_external(ext_id)
             if user is None:
-                new_user_id = db.create_user_from_external(
+                user_id = db.create_user_from_external(
                     external_user_id=ext_id,
                     full_name=_full_name(fields),
                     email=fields['email'],
                     address=_user_address(fields),
                     created_via='sync:buildium')
-                # Issue an initial QR token so synced residents are
-                # scan-ready without an extra admin click. Same helper
-                # the manual /api/users route uses.
-                from .users import issue_initial_token
-                issue_initial_token(new_user_id, comment='auto-created via Buildium sync')
                 counts['users']['created'] += 1
-            elif reactivated and user.get('is_active') == 0:
-                db.set_user_active(user['id'], True)
-                counts['users']['reactivated'] += 1
+            else:
+                user_id = user['id']
+                if reactivated and user.get('is_active') == 0:
+                    db.set_user_active(user_id, True)
+                    counts['users']['reactivated'] += 1
+
+            # Issue a token if the user has none. Covers both the
+            # newly-created case AND the backfill case for users imported
+            # before the auto-token feature existed. Admin-revoked tokens
+            # leave a row with active=0 in the table - those users still
+            # have len(tokens) >= 1, so this skip preserves manual revokes.
+            if not db.get_user_tokens(user_id):
+                comment = ('auto-created via Buildium sync'
+                            if user is None
+                            else 'backfilled via Buildium sync')
+                issue_initial_token(user_id, comment=comment)
+                counts['tokens_issued'] += 1
 
         # Inactivate stale: external_users we didn't see this run
         stale_rows = conn.execute("""

@@ -65,8 +65,9 @@ def test_first_sync_auto_issues_tokens(app_server, buildium_mock):
     same as users created via the manual API. Without this, residents
     show 'No active QR codes' after sync."""
     _save_creds(app_server['base_url'])
-    _sync(app_server['base_url'])
+    result = _sync(app_server['base_url'])
 
+    assert result['tokens_issued'] == 4
     app = app_server['app']
     for u in _get_users(app):
         tokens = app.db.get_user_tokens(u['id'])
@@ -74,6 +75,54 @@ def test_first_sync_auto_issues_tokens(app_server, buildium_mock):
             f"user {u['full_name']!r} expected 1 token, got {len(tokens)}")
         assert tokens[0]['active'] == 1
         assert 'Buildium' in tokens[0]['comment']
+
+
+def test_backfill_issues_tokens_for_pre_existing_users(app_server, buildium_mock):
+    """Users imported before the auto-token feature existed have 0 tokens.
+    Re-syncing should backfill them - one click fixes the whole fleet."""
+    app = app_server['app']
+
+    # Simulate the pre-feature state: external_users + users rows exist
+    # but no tokens. (Sync would normally create tokens too, but we
+    # manually delete them right after to mimic an upgraded install.)
+    _save_creds(app_server['base_url'])
+    _sync(app_server['base_url'])
+    conn = app.db.get_db()
+    conn.execute("DELETE FROM tokens")
+    conn.commit()
+    for u in _get_users(app):
+        assert app.db.get_user_tokens(u['id']) == []
+
+    # Re-sync: backfill should fire for all 4 users.
+    result = _sync(app_server['base_url'])
+    assert result['tokens_issued'] == 4
+    for u in _get_users(app):
+        tokens = app.db.get_user_tokens(u['id'])
+        assert len(tokens) == 1
+        assert tokens[0]['active'] == 1
+        assert 'backfilled' in tokens[0]['comment']
+
+
+def test_backfill_skips_users_with_revoked_tokens(app_server, buildium_mock):
+    """If admin manually revoked a user's token, the row stays in the
+    table with active=0. Backfill must NOT issue a fresh token for
+    those users - that'd silently re-grant access the admin took away."""
+    app = app_server['app']
+
+    _save_creds(app_server['base_url'])
+    _sync(app_server['base_url'])
+
+    # Pick one user, revoke their (auto-issued) token.
+    alice = next(u for u in _get_users(app) if u['full_name'] == 'Alice Owner')
+    alice_token = app.db.get_user_tokens(alice['id'])[0]
+    app.db.revoke_token(alice_token['id'])
+
+    # Re-sync. Backfill must skip Alice (she has 1 token, just inactive).
+    result = _sync(app_server['base_url'])
+    assert result['tokens_issued'] == 0
+    alice_tokens = app.db.get_user_tokens(alice['id'])
+    assert len(alice_tokens) == 1
+    assert alice_tokens[0]['active'] == 0  # still revoked, untouched
 
 
 def test_second_sync_is_idempotent(app_server, buildium_mock):
