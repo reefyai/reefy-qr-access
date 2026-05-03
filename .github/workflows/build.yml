@@ -43,7 +43,12 @@ jobs:
             ghcr.io/reefyai/reefy-qr-access:latest
           provenance: false
           sbom: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Registry-based cache: layers stored as :buildcache tag in the
+          # same GHCR package. Avoids the 10 GB org cache cap (torch +
+          # tensorrt alone is ~6.7 GB). First build after this change
+          # populates :buildcache; subsequent builds reuse all layers
+          # whose RUN line + context didn't change.
+          cache-from: type=registry,ref=ghcr.io/reefyai/reefy-qr-access:buildcache
+          cache-to: type=registry,ref=ghcr.io/reefyai/reefy-qr-access:buildcache,mode=max
 
       - run: echo "Pushed ${{ steps.meta.outputs.image }}"
