@@ -91,6 +91,10 @@ def run_web(port, password):
     set_reload_event(reload_event)
     set_log_capture(log_capture, err_capture)
 
+    # Start the email-delivery background worker. Idempotent.
+    from web.services import email as email_svc
+    email_svc.start_worker()
+
     app.run(host='0.0.0.0', port=port, debug=False,
             use_reloader=False, threaded=True)
 

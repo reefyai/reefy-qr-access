@@ -60,6 +60,21 @@ CREATE TABLE IF NOT EXISTS app_settings (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS email_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_id INTEGER NOT NULL REFERENCES tokens(id) ON DELETE CASCADE,
+    to_email TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    error TEXT,
+    queued_at TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at TEXT,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_email_jobs_user_id ON email_jobs(user_id);
+CREATE INDEX IF NOT EXISTS idx_email_jobs_status  ON email_jobs(status);
+
 CREATE TABLE IF NOT EXISTS cameras (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ip TEXT NOT NULL,
@@ -173,6 +188,8 @@ def init_db():
         db.execute("ALTER TABLE users ADD COLUMN created_via TEXT NOT NULL DEFAULT 'manual'")
     if 'phone' not in user_cols:
         db.execute("ALTER TABLE users ADD COLUMN phone TEXT")
+    if 'last_email_sent_at' not in user_cols:
+        db.execute("ALTER TABLE users ADD COLUMN last_email_sent_at TEXT")
 
     # Index lives outside SCHEMA so it runs after the column-add migration
     # (CREATE TABLE IF NOT EXISTS is a no-op on pre-existing tables, so the
@@ -223,6 +240,7 @@ def get_users():
     rows = db.execute("""
         SELECT u.id, u.full_name, u.email, u.address, u.is_active,
                u.created_via, u.external_user_id, u.created_at,
+               u.last_email_sent_at,
                COALESCE(u.phone, eu.phone_primary) AS phone_primary,
                eu.unit_label, eu.building,
                eu.alternate_email, eu.source AS external_source,

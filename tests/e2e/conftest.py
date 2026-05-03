@@ -161,6 +161,28 @@ def install_buildium_routes(rsps, owners=None, tenants=None,
 
 
 @pytest.fixture
+def smtp_mock(monkeypatch):
+    """Patch smtplib.SMTP so tests don't open a real socket. Returns a
+    list that captures every EmailMessage the code tried to send."""
+    import smtplib
+    sent = []
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout=None):
+            self.host = host
+            self.port = port
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def starttls(self, context=None): pass
+        def login(self, u, p): self.user = u
+        def send_message(self, msg):
+            sent.append(msg)
+
+    monkeypatch.setattr(smtplib, 'SMTP', FakeSMTP)
+    return sent
+
+
+@pytest.fixture
 def buildium_mock():
     """Activates `responses` and yields it so tests can reconfigure mid-run.
     Localhost is passthrough so the test's own requests to Flask aren't mocked.

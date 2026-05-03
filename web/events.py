@@ -41,5 +41,10 @@ class EventBus:
                 self._subscribers.remove(q)
 
 
-# Global singleton
+# Global singleton (access-log events)
 event_bus = EventBus()
+
+# Separate bus for email-job state changes. Kept independent so the
+# logs SSE handler doesn't have to filter unrelated payloads, and the
+# email SSE handler doesn't pick up access-log noise.
+email_bus = EventBus()

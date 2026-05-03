@@ -594,6 +594,108 @@ def api_buildium_sync():
     return jsonify(result)
 
 
+# --- Integrations: Email ---
+
+
+@app.route('/api/integrations/email', methods=['GET'])
+@login_required
+def api_email_status():
+    from .services.email import public_status
+    return jsonify(public_status())
+
+
+@app.route('/api/integrations/email', methods=['POST'])
+@login_required
+def api_email_save():
+    """Save SMTP config. Empty password keeps the saved one (lets the
+    admin tweak Client ID etc. without re-pasting the App Password)."""
+    from .services.email import send_test
+    data = request.get_json() or {}
+    saved = db.get_setting('email.config') or {}
+    cfg = {
+        'smtp_host': (data.get('smtp_host') or '').strip(),
+        'smtp_port': int(data.get('smtp_port') or 587),
+        'username': (data.get('username') or '').strip(),
+        'password': (data.get('password') or '').strip() or saved.get('password', ''),
+        'from_email': (data.get('from_email') or '').strip(),
+        'from_name': (data.get('from_name') or '').strip(),
+        'reply_to': (data.get('reply_to') or '').strip(),
+    }
+    if not (cfg['smtp_host'] and cfg['username'] and cfg['password']
+            and cfg['from_email']):
+        return jsonify(error='smtp_host, username, password, from_email are required'), 400
+    db.set_setting('email.config', cfg)
+    return jsonify(ok=True)
+
+
+@app.route('/api/integrations/email/test', methods=['POST'])
+@login_required
+def api_email_test():
+    """Send a probe email to whatever address the admin types. Doesn't
+    persist anything; uses the just-submitted creds (or saved if any
+    field omitted)."""
+    from .services.email import send_test
+    data = request.get_json() or {}
+    saved = db.get_setting('email.config') or {}
+    cfg = {
+        'smtp_host': (data.get('smtp_host') or saved.get('smtp_host') or '').strip(),
+        'smtp_port': int(data.get('smtp_port') or saved.get('smtp_port') or 587),
+        'username': (data.get('username') or saved.get('username') or '').strip(),
+        'password': (data.get('password') or saved.get('password') or '').strip(),
+        'from_email': (data.get('from_email') or saved.get('from_email') or '').strip(),
+        'from_name': (data.get('from_name') or saved.get('from_name') or '').strip(),
+    }
+    to_email = (data.get('to_email') or '').strip()
+    if not to_email:
+        return jsonify(error='to_email is required'), 400
+    if not (cfg['smtp_host'] and cfg['username'] and cfg['password']
+            and cfg['from_email']):
+        return jsonify(error='SMTP credentials incomplete'), 400
+    try:
+        send_test(cfg, to_email)
+    except Exception as e:
+        return jsonify(error=str(e)[:500]), 400
+    return jsonify(ok=True, sent_to=to_email)
+
+
+@app.route('/api/users/<int:user_id>/email-qr', methods=['POST'])
+@login_required
+def api_user_email_qr(user_id):
+    from .services.email import enqueue_for_user, is_configured
+    if not is_configured():
+        return jsonify(error='Email integration not configured'), 400
+    job_id = enqueue_for_user(user_id)
+    if job_id is None:
+        return jsonify(error='User has no email or no active token'), 400
+    return jsonify(ok=True, job_id=job_id)
+
+
+@app.route('/api/email-jobs/stream')
+@login_required
+def api_email_jobs_stream():
+    """SSE stream of email-job state changes. Dashboard listens here so
+    the per-row 'Last sent' cell updates without polling."""
+    from .events import email_bus
+
+    def generate():
+        q = email_bus.subscribe()
+        try:
+            while True:
+                try:
+                    msg = q.get(timeout=15)
+                    yield f"data: {msg}\n\n"
+                except Exception:
+                    yield ': keepalive\n\n'
+        finally:
+            email_bus.unsubscribe(q)
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
+
+
 # --- Config export ---
 
 @app.route('/api/export-config', methods=['POST'])
