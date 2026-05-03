@@ -191,6 +191,52 @@ def init_db():
     if 'last_email_sent_at' not in user_cols:
         db.execute("ALTER TABLE users ADD COLUMN last_email_sent_at TEXT")
 
+    # Drop legacy email NOT NULL + UNIQUE constraint. Existing installs
+    # have it from the original schema; CREATE TABLE IF NOT EXISTS in
+    # SCHEMA was a no-op so we can't change the column shape without
+    # rebuilding the table. Detect via PRAGMA: notnull=1 on email means
+    # the old constraint is in force, AND/OR a sqlite_autoindex on
+    # users(email) confirms UNIQUE. Buildium sync needs nullable +
+    # non-unique because residents can share emails (spouses) and some
+    # records have no email at all.
+    user_cols_info = db.execute("PRAGMA table_info(users)").fetchall()
+    email_col = next((c for c in user_cols_info if c[1] == 'email'), None)
+    needs_email_rebuild = bool(email_col and email_col[3] == 1)
+    if not needs_email_rebuild:
+        # Also catch the case where notnull was already loosened by an
+        # older migration but the UNIQUE auto-index lingers.
+        idx_rows = db.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' AND tbl_name='users' "
+            "AND name LIKE 'sqlite_autoindex%'"
+        ).fetchall()
+        # The PRIMARY KEY also creates a sqlite_autoindex; presence of
+        # >1 such index implies an extra UNIQUE constraint somewhere.
+        needs_email_rebuild = len(idx_rows) > 1
+    if needs_email_rebuild:
+        db.executescript("""
+            CREATE TABLE users_rebuild (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                full_name TEXT NOT NULL,
+                email TEXT,
+                phone TEXT,
+                address TEXT NOT NULL DEFAULT '',
+                external_user_id INTEGER REFERENCES external_users(id),
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_via TEXT NOT NULL DEFAULT 'manual',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                last_email_sent_at TEXT
+            );
+            INSERT INTO users_rebuild
+                (id, full_name, email, phone, address, external_user_id,
+                 is_active, created_via, created_at, last_email_sent_at)
+                SELECT id, full_name, email, phone, address, external_user_id,
+                       is_active, created_via, created_at, last_email_sent_at
+                FROM users;
+            DROP TABLE users;
+            ALTER TABLE users_rebuild RENAME TO users;
+        """)
+
     # Index lives outside SCHEMA so it runs after the column-add migration
     # (CREATE TABLE IF NOT EXISTS is a no-op on pre-existing tables, so the
     # column the index needs may not exist yet at SCHEMA-execute time).
