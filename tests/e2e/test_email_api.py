@@ -119,6 +119,55 @@ def test_email_qr_blocked_when_unconfigured(app_server):
     assert 'not configured' in r.json()['error'].lower()
 
 
+def test_email_qr_batch_enqueues_all_with_emails(app_server, smtp_mock):
+    """Bulk endpoint enqueues one job per valid user; the worker then
+    drains them in order. Skips users without email."""
+    base = app_server['base_url']
+    _save_smtp(base)
+    a = _create_user(base, email='a@example.com')
+    b = _create_user(base, email='b@example.com')
+    c = _create_user(base, email='c@example.com')
+    app = app_server['app']
+    # Sneak in a no-email user (manual route would refuse) to verify skip.
+    no_email = app.db.create_user('No Email', None, '')
+
+    r = requests.post(f'{base}/api/users/email-qr-batch',
+                       json={'user_ids': [a, b, c, no_email]}, timeout=10)
+    r.raise_for_status()
+    body = r.json()
+    assert body['queued'] == 3
+    assert body['skipped'] == 1
+
+    # Drain the queue synchronously (test-process worker isn't running).
+    from web.services import email as email_svc
+    for _ in range(3):
+        job = email_svc._pop_next_queued_job()
+        assert job is not None
+        email_svc._process_job(job)
+    assert email_svc._pop_next_queued_job() is None
+
+    sent_to = sorted(m['To'] for m in smtp_mock)
+    assert sent_to == ['a@example.com', 'b@example.com', 'c@example.com']
+
+
+def test_email_disconnect_clears_creds_keeps_templates(app_server, smtp_mock):
+    base = app_server['base_url']
+    payload = {**SMTP_CFG,
+                'subject_template': 'Custom subject for {{ full_name }}'}
+    requests.post(f'{base}/api/integrations/email',
+                   json=payload, timeout=10).raise_for_status()
+    s = requests.get(f'{base}/api/integrations/email').json()
+    assert s['configured'] is True
+    assert s['subject_template']
+
+    r = requests.delete(f'{base}/api/integrations/email')
+    r.raise_for_status()
+    s = requests.get(f'{base}/api/integrations/email').json()
+    assert s['configured'] is False
+    # Template survives so the admin doesn't have to re-author it.
+    assert 'Custom subject' in s['subject_template']
+
+
 def test_smtp_save_keeps_password_when_blank(app_server, smtp_mock):
     base = app_server['base_url']
     _save_smtp(base)   # initial save with password

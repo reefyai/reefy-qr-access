@@ -124,7 +124,26 @@
 <section class="settings-pane" data-pane="email">
     <div class="panel">
         <h3>SMTP relay
-            <button class="help" type="button" data-help="Gmail SMTP setup: 1) Enable 2-Step Verification on your Google account. 2) Create an App Password at https://myaccount.google.com/apppasswords (Mail). 3) Copy the 16-character password (remove spaces). 4) Use SMTP host smtp.gmail.com, port 587, your full Gmail address as username, and the app password as password. For 120-resident batches you are well under Gmail's 500/day limit; the worker paces ~1s between sends to avoid spam-filter bursts.">?</button>
+            <button class="help" type="button" data-help="Gmail SMTP setup:
+
+1. Enable 2-Step Verification on your Google account.
+
+2. Create an App Password at:
+   https://myaccount.google.com/apppasswords
+
+3. Copy the 16-character password (remove spaces -
+   Google may show it like 'abcd efgh ijkl mnop'; use
+   'abcdefghijklmnop').
+
+4. Settings:
+   SMTP host: smtp.gmail.com
+   Port: 587
+   Username: your full Gmail address
+   Password: the 16-char app password (no spaces)
+
+For ~120-resident batches you are well under Gmail's
+500/day limit; the worker paces ~1s between sends to
+avoid spam-filter bursts.">?</button>
         </h3>
 
         <div id="email-status" style="margin-bottom:0.8rem;font-size:0.9em;color:#aaa;">
@@ -154,17 +173,40 @@
             <label>From email</label>
             <input type="email" name="from_email" id="email-from-email"
                    placeholder="manager@example.com">
+
+            <div style="display:flex;gap:0.5rem;margin-top:0.8rem;align-items:center;">
+                <button type="submit">Save</button>
+                <button type="button" id="email-disconnect-btn"
+                        onclick="emailDisconnect()" class="btn-danger"
+                        style="display:none;">Disconnect</button>
+            </div>
+            <div id="email-conn-msg" style="margin-top:0.6rem;font-size:0.9em;"></div>
         </form>
     </div>
 
     <div class="panel" style="margin-top:1rem;">
         <h3>Message template
-            <button class="help" type="button" data-help="Use {{ full_name }}, {{ unit_label }}, {{ building }}, {{ email }}, {{ phone }}, or {{ qr_code }} anywhere in the subject or body. {{ qr_code }} expands to the inline QR image; if you don't include it in the HTML body, the QR image is appended at the end. Leave a field blank to use the built-in default.">?</button>
+            {% raw %}
+            <button class="help" type="button" data-help="Available placeholders (you can use either {{ var }} or {var}):
+
+  {{ full_name }}
+  {{ unit_label }}
+  {{ building }}
+  {{ email }}
+  {{ phone }}
+  {{ qr_code }}    <- expands to the inline QR image
+
+If you don't include {{ qr_code }} in the HTML body, the QR image is appended at the end.
+
+Leave a field blank to use the built-in default template.">?</button>
+            {% endraw %}
         </h3>
         <form id="email-template-form" onsubmit="event.preventDefault(); emailSave()">
             <label>Subject</label>
+            {% raw %}
             <input type="text" name="subject_template" id="email-subject"
                    placeholder="Your QR access code for {{ unit_label }}">
+            {% endraw %}
 
             <label>HTML body</label>
             <textarea name="body_html_template" id="email-body-html" rows="10"
@@ -174,9 +216,11 @@
             <textarea name="body_text_template" id="email-body-text" rows="6"
                       placeholder="(uses default template if blank)"></textarea>
 
-            <div style="display:flex;gap:0.5rem;margin-top:0.8rem;align-items:center;">
+            <div style="display:flex;gap:0.5rem;margin-top:0.8rem;align-items:center;flex-wrap:wrap;">
                 <button type="submit">Save</button>
+                {% raw %}
                 <span style="color:#888;font-size:0.82em;">Variables: {{ full_name }}, {{ unit_label }}, {{ building }}, {{ email }}, {{ phone }}, {{ qr_code }}</span>
+                {% endraw %}
             </div>
         </form>
     </div>
@@ -408,19 +452,14 @@ async function emailLoadStatus() {
     if (d.has_password) {
         document.getElementById('email-password').placeholder = '(saved - leave blank to keep)';
     }
-    // Pre-fill template fields with the saved value, or leave the
-    // placeholder showing the default. Show the default-body excerpt
-    // as placeholder so admins know what the baseline looks like.
-    document.getElementById('email-subject').value = d.subject_template || '';
-    document.getElementById('email-subject').placeholder = d.default_subject || '';
-    document.getElementById('email-body-html').value = d.body_html_template || '';
-    document.getElementById('email-body-text').value = d.body_text_template || '';
-    if (d.default_body_html) {
-        document.getElementById('email-body-html').placeholder = d.default_body_html;
-    }
-    if (d.default_body_text) {
-        document.getElementById('email-body-text').placeholder = d.default_body_text;
-    }
+    document.getElementById('email-disconnect-btn').style.display = d.configured ? '' : 'none';
+    // Pre-fill template fields with the saved value, falling back to
+    // the built-in defaults so the textareas show editable starter
+    // content (greyed-out placeholders are easy to miss + harder to
+    // tweak than real values).
+    document.getElementById('email-subject').value = d.subject_template || d.default_subject || '';
+    document.getElementById('email-body-html').value = d.body_html_template || d.default_body_html || '';
+    document.getElementById('email-body-text').value = d.body_text_template || d.default_body_text || '';
 }
 
 async function emailSave() {
@@ -436,6 +475,20 @@ async function emailSave() {
     if (!res.ok) { emailMsg(d.error || 'Save failed', 'error'); return; }
     emailMsg('Saved.', 'success');
     emailLoadStatus();
+}
+
+function emailDisconnect() {
+    confirmAction(
+        'Disconnect SMTP relay? Email sending will be disabled until you reconnect.',
+        async () => {
+            const res = await fetch('/api/integrations/email', {method: 'DELETE'});
+            if (!res.ok) { emailMsg('Disconnect failed', 'error'); return; }
+            ['email-smtp-host','email-username','email-password','email-from-name','email-from-email']
+                .forEach(id => { document.getElementById(id).value = ''; });
+            document.getElementById('email-smtp-port').value = 587;
+            emailLoadStatus();
+            emailMsg('Disconnected.', 'success');
+        });
 }
 
 async function emailTest() {

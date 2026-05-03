@@ -606,6 +606,21 @@ def api_email_status():
     return jsonify(public_status())
 
 
+@app.route('/api/integrations/email', methods=['DELETE'])
+@login_required
+def api_email_disconnect():
+    """Wipe saved SMTP config so admin can replace it from a clean slate.
+    Doesn't touch templates - those persist for re-use after reconnect."""
+    saved = db.get_setting('email.config') or {}
+    db.set_setting('email.config', {
+        # Keep the templates; clear the connection fields.
+        'subject_template': saved.get('subject_template', ''),
+        'body_html_template': saved.get('body_html_template', ''),
+        'body_text_template': saved.get('body_text_template', ''),
+    })
+    return jsonify(ok=True)
+
+
 @app.route('/api/integrations/email', methods=['POST'])
 @login_required
 def api_email_save():
@@ -674,6 +689,33 @@ def api_user_email_qr(user_id):
     if job_id is None:
         return jsonify(error='User has no email or no active token'), 400
     return jsonify(ok=True, job_id=job_id)
+
+
+@app.route('/api/users/email-qr-batch', methods=['POST'])
+@login_required
+def api_users_email_qr_batch():
+    """Bulk-enqueue: one email_jobs row per user. Returns counts so the
+    UI can show {queued, skipped} feedback. Worker drains the queue
+    serially with the configured per-send pacing."""
+    from .services.email import enqueue_for_user, is_configured
+    if not is_configured():
+        return jsonify(error='Email integration not configured'), 400
+    data = request.get_json() or {}
+    ids = data.get('user_ids') or []
+    if not isinstance(ids, list) or not ids:
+        return jsonify(error='user_ids must be a non-empty list'), 400
+    queued, skipped = 0, 0
+    for uid in ids:
+        try:
+            uid_int = int(uid)
+        except (ValueError, TypeError):
+            skipped += 1
+            continue
+        if enqueue_for_user(uid_int) is None:
+            skipped += 1
+        else:
+            queued += 1
+    return jsonify(ok=True, queued=queued, skipped=skipped)
 
 
 @app.route('/api/email-jobs/stream')

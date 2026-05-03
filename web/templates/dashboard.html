@@ -14,10 +14,20 @@ Internal
 {%- endif -%}
 {%- endmacro %}
 
+<div id="bulk-bar" style="display:none;align-items:center;gap:0.6rem;background:#1a2a1a;border:1px solid #2d6a2d;border-radius:6px;padding:0.5rem 0.8rem;margin-bottom:0.6rem;color:#86efac;flex-wrap:wrap;">
+    <span id="bulk-count">0 selected</span>
+    <select id="bulk-action" style="background:#1a1a1a;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:0.3rem 0.5rem;">
+        <option value="email">Send Email</option>
+    </select>
+    <button class="btn-sm" onclick="bulkApply()">Apply</button>
+    <button class="btn-sm" onclick="bulkClear()">Clear</button>
+</div>
+
 <div class="table-wrap">
 <table>
     <thead>
         <tr>
+            <th style="width:1.5rem;"><input type="checkbox" id="select-all" onclick="toggleSelectAll(this)"></th>
             <th>Source</th>
             <th>Name</th>
             <th>Email</th>
@@ -32,6 +42,7 @@ Internal
         {% for user in users %}
         {% set src = source_label(user) %}
         <tr id="user-{{ user.id }}" data-email="{{ user.email or '' }}"{% if user.is_active == 0 %} class="user-row-inactive"{% endif %}>
+            <td data-label="Select"><input type="checkbox" class="row-select" data-user-id="{{ user.id }}" onclick="onRowSelect()"{% if not user.email %} disabled title="No email"{% endif %}></td>
             <td data-label="Source"><span class="badge badge-source-{{ src.lower() }}">{{ src }}</span></td>
             <td data-label="Name">
                 {{ user.full_name }}
@@ -46,13 +57,13 @@ Internal
             </td>
             <td class="actions">
                 <button class="btn-sm" onclick="showTokens({{ user.id }}, '{{ user.full_name }}')">QR Codes</button>
-                <button class="btn-sm" onclick="emailQr({{ user.id }})"{% if not user.email %} disabled{% endif %}>Email</button>
+                <button class="btn-sm" onclick="emailQr({{ user.id }}, '{{ user.full_name }}')"{% if not user.email %} disabled{% endif %}>Send Email</button>
                 <button class="btn-sm btn-danger" onclick="deleteUser({{ user.id }}, '{{ user.full_name }}')">Delete</button>
             </td>
         </tr>
         {% endfor %}
         {% if not users %}
-        <tr><td colspan="8" class="empty">No users yet. Click "+ Add User" to create one.</td></tr>
+        <tr><td colspan="9" class="empty">No users yet. Click "+ Add User" to create one.</td></tr>
         {% endif %}
     </tbody>
 </table>
@@ -121,11 +132,13 @@ async function addUser(form) {
     const row = document.createElement('tr');
     row.id = `user-${u.id}`;
     const esc = u.full_name.replace(/'/g, "\\'");
-    // Match the 8-column server-rendered layout (Source/Name/Email/Phone/
-    // Unit/Created/Last sent/Actions). Manual users render as Internal source;
-    // unit column shows the free-form address since they have no Buildium unit.
+    // Match the 9-column server-rendered layout (Select/Source/Name/Email/
+    // Phone/Unit/Created/Last sent/Actions). Manual users render as Internal
+    // source; unit column shows the free-form address since they have no
+    // Buildium unit.
     row.dataset.email = u.email || '';
     row.innerHTML = `
+        <td data-label="Select"><input type="checkbox" class="row-select" data-user-id="${u.id}" onclick="onRowSelect()"${u.email ? '' : ' disabled title="No email"'}></td>
         <td data-label="Source"><span class="badge badge-source-internal">Internal</span></td>
         <td data-label="Name">${u.full_name}</td>
         <td data-label="Email">${u.email || ''}</td>
@@ -135,7 +148,7 @@ async function addUser(form) {
         <td data-label="Last sent" class="email-cell" id="email-cell-${u.id}">-</td>
         <td class="actions">
             <button class="btn-sm" onclick="showTokens(${u.id}, '${esc}')">QR Codes</button>
-            <button class="btn-sm" onclick="emailQr(${u.id})"${u.email ? '' : ' disabled'}>Email</button>
+            <button class="btn-sm" onclick="emailQr(${u.id}, '${esc}')"${u.email ? '' : ' disabled'}>Send Email</button>
             <button class="btn-sm btn-danger" onclick="deleteUser(${u.id}, '${esc}')">Delete</button>
         </td>`;
     document.getElementById('users-table').prepend(row);
@@ -237,7 +250,7 @@ function setEmailCell(userId, html, color) {
     cell.style.color = color || '';
 }
 
-async function emailQr(userId) {
+async function _doEmailQr(userId) {
     setEmailCell(userId, 'Sending...', '#fbbf24');
     const res = await fetch(`/api/users/${userId}/email-qr`, {method: 'POST'});
     const d = await res.json();
@@ -245,8 +258,68 @@ async function emailQr(userId) {
         setEmailCell(userId, 'Failed', '#f87171');
         showError(d.error || 'Email failed');
     }
-    // No further UI change here; the SSE listener below updates the cell
-    // when the worker actually sends.
+    // Cell updates further via the SSE listener when the worker fires.
+}
+
+function emailQr(userId, name) {
+    confirmAction(
+        `Send the QR code to <strong>${name}</strong> by email?`,
+        () => _doEmailQr(userId));
+}
+
+// --- Bulk select + bulk action ---
+function _selectedIds() {
+    return Array.from(document.querySelectorAll('.row-select:checked'))
+        .map(cb => parseInt(cb.dataset.userId));
+}
+function _refreshBulkBar() {
+    const ids = _selectedIds();
+    const bar = document.getElementById('bulk-bar');
+    bar.style.display = ids.length ? 'flex' : 'none';
+    document.getElementById('bulk-count').textContent =
+        `${ids.length} selected`;
+    // Sync the master checkbox state.
+    const all = document.querySelectorAll('.row-select:not([disabled])');
+    const checked = document.querySelectorAll('.row-select:checked');
+    const master = document.getElementById('select-all');
+    if (master) {
+        master.checked = all.length > 0 && checked.length === all.length;
+        master.indeterminate = checked.length > 0 && checked.length < all.length;
+    }
+}
+function onRowSelect() { _refreshBulkBar(); }
+function toggleSelectAll(cb) {
+    document.querySelectorAll('.row-select:not([disabled])').forEach(rcb => {
+        rcb.checked = cb.checked;
+    });
+    _refreshBulkBar();
+}
+function bulkClear() {
+    document.querySelectorAll('.row-select').forEach(cb => { cb.checked = false; });
+    _refreshBulkBar();
+}
+function bulkApply() {
+    const ids = _selectedIds();
+    if (!ids.length) return;
+    const action = document.getElementById('bulk-action').value;
+    if (action === 'email') {
+        confirmAction(
+            `Send QR codes to <strong>${ids.length}</strong> resident${ids.length === 1 ? '' : 's'} by email?`,
+            async () => {
+                ids.forEach(id => setEmailCell(id, 'Queued...', '#fbbf24'));
+                const res = await fetch('/api/users/email-qr-batch', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({user_ids: ids}),
+                });
+                if (!res.ok) {
+                    const d = await res.json();
+                    showError(d.error || 'Batch email failed');
+                    return;
+                }
+                bulkClear();
+            });
+    }
 }
 
 (function emailJobsSSE() {

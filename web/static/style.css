@@ -423,9 +423,12 @@ td { font-size: 0.9rem; }
     color: #ccc;
     font-size: 0.85rem;
     line-height: 1.45;
-    max-width: 320px;
+    max-width: 380px;
     z-index: 200;
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.55);
+    /* Preserve newlines + leading whitespace so multi-line tooltips
+       (e.g. setup walkthroughs) render legibly. */
+    white-space: pre-wrap;
 }
 
 .log-denied { background: #fef5f4; }

@@ -24,12 +24,12 @@ from ..events import email_bus
 DEFAULT_SUBJECT = 'Your QR access code'
 QR_IMG_TAG = ('<img src="cid:qrcode" alt="QR access code" '
               'style="border:1px solid #eee;padding:6px;'
-              'background:#fff;max-width:240px;">')
+              'background:#fff;max-width:240px;display:block;">')
 DEFAULT_BODY_HTML = """\
 <p>Hi {full_name},</p>
 <p>Here is your QR code for door access. Show it to the camera at the
 entrance and the door will unlock.</p>
-<p style="text-align:center;margin:1.5em 0;">{qr_code}</p>
+<p style="margin:1.5em 0;">{qr_code}</p>
 <p>Save this image on your phone or print it. Keep it private - anyone
 with the image can open the door.</p>
 """
@@ -244,7 +244,7 @@ def _process_job(job: dict) -> None:
     # If the HTML body doesn't reference the QR placeholder, append the
     # image so the recipient always gets it.
     if 'cid:qrcode' not in body_html:
-        body_html += f'<p style="text-align:center;margin:1.5em 0;">{QR_IMG_TAG}</p>'
+        body_html += f'<p style="margin:1.5em 0;">{QR_IMG_TAG}</p>'
 
     try:
         send_one(cfg, user['email'], subject, body_html, body_text, qr_bytes)
