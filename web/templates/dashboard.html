@@ -2,7 +2,7 @@
 {% block title %}Users - QR Access{% endblock %}
 {% block content %}
 <div class="header-row">
-    <h1>Users</h1>
+    <h1>Users <span id="users-count" style="color:#888;font-weight:400;font-size:0.7em;">({{ users|length }})</span></h1>
     <button onclick="showAddUser()">+ Add User</button>
 </div>
 
@@ -152,6 +152,7 @@ async function addUser(form) {
             <button class="btn-sm btn-danger" onclick="deleteUser(${u.id}, '${esc}')">Delete</button>
         </td>`;
     document.getElementById('users-table').prepend(row);
+    updateUsersCount();
     closeModal();
 }
 
@@ -238,8 +239,17 @@ async function addToken(userId, userName, form) {
 function deleteUser(userId, name) {
     confirmAction(`Delete user <strong>${name}</strong>? This will revoke all their QR codes.`, async () => {
         const res = await api(`/api/users/${userId}`, 'DELETE');
-        if (res.ok) document.getElementById(`user-${userId}`).remove();
+        if (res.ok) {
+            document.getElementById(`user-${userId}`).remove();
+            updateUsersCount();
+        }
     });
+}
+
+function updateUsersCount() {
+    const n = document.querySelectorAll('#users-table tr[id^="user-"]').length;
+    const el = document.getElementById('users-count');
+    if (el) el.textContent = `(${n})`;
 }
 
 // --- Email QR ---
