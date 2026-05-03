@@ -14,7 +14,6 @@
         <div class="nav-links">
             <a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">Users</a>
             <a href="{{ url_for('logs') }}" class="{% if request.endpoint == 'logs' %}active{% endif %}">Logs</a>
-            <a href="{{ url_for('system_logs') }}" class="{% if request.endpoint == 'system_logs' %}active{% endif %}">System</a>
             <a href="{{ url_for('settings') }}" class="{% if request.endpoint == 'settings' %}active{% endif %}">Settings</a>
             <a href="{{ url_for('logout') }}">Logout</a>
         </div>

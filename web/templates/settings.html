@@ -9,6 +9,7 @@
     <button class="settings-tab" data-tab="doors" onclick="showSettingsTab('doors')">Doors</button>
     <button class="settings-tab" data-tab="integrations" onclick="showSettingsTab('integrations')">Integrations</button>
     <button class="settings-tab" data-tab="email" onclick="showSettingsTab('email')">Email</button>
+    <button class="settings-tab" data-tab="system" onclick="showSettingsTab('system')">System</button>
 </div>
 
 <!-- ========================================================== -->
@@ -153,18 +154,63 @@
             <label>From email</label>
             <input type="email" name="from_email" id="email-from-email"
                    placeholder="manager@example.com">
+        </form>
+    </div>
 
-            <label>Send test email to</label>
+    <div class="panel" style="margin-top:1rem;">
+        <h3>Message template
+            <button class="help" type="button" data-help="Use {{ full_name }}, {{ unit_label }}, {{ building }}, {{ email }}, {{ phone }}, or {{ qr_code }} anywhere in the subject or body. {{ qr_code }} expands to the inline QR image; if you don't include it in the HTML body, the QR image is appended at the end. Leave a field blank to use the built-in default.">?</button>
+        </h3>
+        <form id="email-template-form" onsubmit="event.preventDefault(); emailSave()">
+            <label>Subject</label>
+            <input type="text" name="subject_template" id="email-subject"
+                   placeholder="Your QR access code for {{ unit_label }}">
+
+            <label>HTML body</label>
+            <textarea name="body_html_template" id="email-body-html" rows="10"
+                      placeholder="(uses default template if blank)"></textarea>
+
+            <label>Plain-text fallback</label>
+            <textarea name="body_text_template" id="email-body-text" rows="6"
+                      placeholder="(uses default template if blank)"></textarea>
+
+            <div style="display:flex;gap:0.5rem;margin-top:0.8rem;align-items:center;">
+                <button type="submit">Save</button>
+                <span style="color:#888;font-size:0.82em;">Variables: {{ full_name }}, {{ unit_label }}, {{ building }}, {{ email }}, {{ phone }}, {{ qr_code }}</span>
+            </div>
+        </form>
+    </div>
+
+    <div class="panel" style="margin-top:1rem;">
+        <h3>Send test email</h3>
+        <form id="email-test-form" onsubmit="event.preventDefault(); emailTest()">
+            <label>Recipient address</label>
             <input type="email" id="email-test-to"
                    placeholder="someone@example.com">
-
-            <div style="display:flex;gap:0.5rem;margin-top:0.6rem;">
-                <button type="button" onclick="emailTest()">Send test</button>
-                <button type="submit">Save</button>
+            <div style="margin-top:0.6rem;">
+                <button type="submit">Send test</button>
             </div>
-
             <div id="email-msg" style="margin-top:0.6rem;font-size:0.9em;"></div>
         </form>
+    </div>
+</section>
+
+<!-- ========================================================== -->
+<!-- SYSTEM TAB (live system logs)                              -->
+<!-- ========================================================== -->
+<section class="settings-pane" data-pane="system">
+    <div class="header-row">
+        <h2>System logs</h2>
+        <div>
+            <span class="live-badge" id="syslog-badge">LIVE</span>
+            <button class="btn-sm" onclick="syslogClear()">Clear</button>
+            <button class="btn-sm" onclick="syslogScrollBottom()">↓ Bottom</button>
+        </div>
+    </div>
+    <div id="syslog-container" style="background:#0a0a0a;border:1px solid #222;border-radius:4px;padding:0.5rem;height:calc(100vh - 220px);overflow-y:auto;font-family:monospace;font-size:0.75rem;color:#aaa;line-height:1.5;">
+        {% for line in syslog_lines %}
+        <div class="syslog-line">{{ line }}</div>
+        {% endfor %}
     </div>
 </section>
 
@@ -186,9 +232,12 @@ function showSettingsTab(name) {
     if (location.hash !== '#' + name) {
         history.replaceState(null, '', '#' + name);
     }
+    // Lazy-init: only open the syslog SSE on first System tab view, so
+    // we don't keep an EventSource open for users who never look at it.
+    if (name === 'system') syslogInit();
 }
 (function initSettingsTab() {
-    const valid = ['doors', 'integrations', 'email'];
+    const valid = ['doors', 'integrations', 'email', 'system'];
     let tab = location.hash.replace('#', '');
     if (!valid.includes(tab)) tab = 'doors';
     showSettingsTab(tab);
@@ -333,6 +382,9 @@ function emailFormPayload() {
         password: document.getElementById('email-password').value.trim(),
         from_name: document.getElementById('email-from-name').value.trim(),
         from_email: document.getElementById('email-from-email').value.trim(),
+        subject_template: document.getElementById('email-subject').value,
+        body_html_template: document.getElementById('email-body-html').value,
+        body_text_template: document.getElementById('email-body-text').value,
     };
 }
 
@@ -355,6 +407,19 @@ async function emailLoadStatus() {
     if (d.from_email) document.getElementById('email-from-email').value = d.from_email;
     if (d.has_password) {
         document.getElementById('email-password').placeholder = '(saved - leave blank to keep)';
+    }
+    // Pre-fill template fields with the saved value, or leave the
+    // placeholder showing the default. Show the default-body excerpt
+    // as placeholder so admins know what the baseline looks like.
+    document.getElementById('email-subject').value = d.subject_template || '';
+    document.getElementById('email-subject').placeholder = d.default_subject || '';
+    document.getElementById('email-body-html').value = d.body_html_template || '';
+    document.getElementById('email-body-text').value = d.body_text_template || '';
+    if (d.default_body_html) {
+        document.getElementById('email-body-html').placeholder = d.default_body_html;
+    }
+    if (d.default_body_text) {
+        document.getElementById('email-body-text').placeholder = d.default_body_text;
     }
 }
 
@@ -390,6 +455,52 @@ async function emailTest() {
 }
 
 emailLoadStatus();
+
+// --- System logs (inline in System tab; lazy SSE) ---
+let _syslogInit = false;
+let _syslogAutoScroll = true;
+
+function syslogInit() {
+    if (_syslogInit) return;
+    _syslogInit = true;
+    const container = document.getElementById('syslog-container');
+    const badge = document.getElementById('syslog-badge');
+    container.addEventListener('scroll', () => {
+        const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+        _syslogAutoScroll = atBottom;
+    });
+    syslogScrollBottom();
+    const evt = new EventSource('/api/system-logs/stream');
+    evt.onmessage = function(e) {
+        let d;
+        try { d = JSON.parse(e.data); } catch { return; }
+        const div = document.createElement('div');
+        div.className = 'syslog-line';
+        if (d.stream === 'stderr') div.style.color = '#f87171';
+        div.textContent = d.line;
+        container.appendChild(div);
+        while (container.children.length > 2000) {
+            container.removeChild(container.firstChild);
+        }
+        if (_syslogAutoScroll) container.scrollTop = container.scrollHeight;
+    };
+    evt.onerror = function() {
+        badge.textContent = 'DISCONNECTED';
+        badge.classList.add('badge-disconnected');
+    };
+    evt.onopen = function() {
+        badge.textContent = 'LIVE';
+        badge.classList.remove('badge-disconnected');
+    };
+}
+function syslogClear() {
+    const c = document.getElementById('syslog-container');
+    if (c) c.innerHTML = '';
+}
+function syslogScrollBottom() {
+    const c = document.getElementById('syslog-container');
+    if (c) { c.scrollTop = c.scrollHeight; _syslogAutoScroll = true; }
+}
 
 function showAddDoor() {
     // Build camera and shelly options from current page data

@@ -22,24 +22,44 @@ from ..events import email_bus
 
 
 DEFAULT_SUBJECT = 'Your QR access code'
+QR_IMG_TAG = ('<img src="cid:qrcode" alt="QR access code" '
+              'style="border:1px solid #eee;padding:6px;'
+              'background:#fff;max-width:240px;">')
 DEFAULT_BODY_HTML = """\
 <p>Hi {full_name},</p>
 <p>Here is your QR code for door access. Show it to the camera at the
 entrance and the door will unlock.</p>
-<p style="text-align:center;margin:1.5em 0;">
-  <img src="cid:qrcode" alt="QR access code"
-       style="border:1px solid #eee;padding:6px;background:#fff;max-width:240px;">
-</p>
+<p style="text-align:center;margin:1.5em 0;">{qr_code}</p>
 <p>Save this image on your phone or print it. Keep it private - anyone
 with the image can open the door.</p>
 """
 DEFAULT_BODY_TEXT = """\
 Hi {full_name},
 
-Your QR access code is attached as an image. Show it to the camera at
-the entrance and the door will unlock. Save it on your phone or print
-it. Keep it private - anyone with the image can open the door.
+Your QR code for door access is attached. Show it to the camera at the
+entrance and the door will unlock. Save it on your phone or print it.
+Keep it private - anyone with the image can open the door.
 """
+
+# Substitutions available in subject + body templates. Admins can write
+# {{ full_name }} (or {full_name}, both work) anywhere in their subject
+# or body to interpolate per-recipient. {{ qr_code }} expands to an
+# inline <img cid:qrcode> tag in the HTML body; if omitted the worker
+# appends the image at the end so the QR is always present.
+TEMPLATE_VARS = ['full_name', 'unit_label', 'building',
+                 'email', 'phone', 'qr_code']
+
+
+def _render_template(tmpl: str, ctx: dict) -> str:
+    """Substitute {{ var }} and {var} placeholders. Unknown placeholders
+    are left as-is rather than raising, so a typo in admin's template
+    doesn't break the send."""
+    out = tmpl
+    for k, v in ctx.items():
+        out = out.replace('{{ ' + k + ' }}', str(v))
+        out = out.replace('{{' + k + '}}', str(v))
+        out = out.replace('{' + k + '}', str(v))
+    return out
 
 # Pace SMTP sends so a 100-in-one-second burst doesn't trip provider
 # spam heuristics (Gmail in particular). docs/email-delivery.md.
@@ -73,6 +93,13 @@ def public_status() -> dict:
         'from_email': c.get('from_email', ''),
         'from_name': c.get('from_name', ''),
         'has_password': bool(c.get('password')),
+        'subject_template': c.get('subject_template', ''),
+        'body_html_template': c.get('body_html_template', ''),
+        'body_text_template': c.get('body_text_template', ''),
+        'default_subject': DEFAULT_SUBJECT,
+        'default_body_html': DEFAULT_BODY_HTML,
+        'default_body_text': DEFAULT_BODY_TEXT,
+        'template_vars': TEMPLATE_VARS,
     }
 
 
@@ -189,12 +216,38 @@ def _process_job(job: dict) -> None:
         generate_qr_png(token_str)
     qr_bytes = Path(png_path).read_bytes()
 
-    full_name = user['full_name']
-    body_html = DEFAULT_BODY_HTML.format(full_name=full_name)
-    body_text = DEFAULT_BODY_TEXT.format(full_name=full_name)
+    # Build the per-user template context. unit_label / building come
+    # from the joined external_users row when available; manual users
+    # get blanks. {qr_code} -> inline <img>; HTML template that omits
+    # the placeholder still works because we append the image below.
+    users_full = db.get_users()
+    user_full = next((u for u in users_full if u['id'] == user_id), {})
+    ctx = {
+        'full_name': user.get('full_name') or '',
+        'email': user.get('email') or '',
+        'phone': user_full.get('phone_primary') or user.get('phone') or '',
+        'unit_label': user_full.get('unit_label') or user.get('address') or '',
+        'building': user_full.get('building') or '',
+        'qr_code': QR_IMG_TAG,
+    }
+
+    subject_tmpl = (cfg.get('subject_template') or '').strip() or DEFAULT_SUBJECT
+    body_html_tmpl = (cfg.get('body_html_template') or '').strip() or DEFAULT_BODY_HTML
+    body_text_tmpl = (cfg.get('body_text_template') or '').strip() or DEFAULT_BODY_TEXT
+
+    subject = _render_template(subject_tmpl, ctx)
+    body_html = _render_template(body_html_tmpl, ctx)
+    # Plain-text body: substitute qr_code with a friendly note instead
+    # of raw HTML, since cid:qrcode means nothing in plain text.
+    text_ctx = {**ctx, 'qr_code': '[QR code attached as image]'}
+    body_text = _render_template(body_text_tmpl, text_ctx)
+    # If the HTML body doesn't reference the QR placeholder, append the
+    # image so the recipient always gets it.
+    if 'cid:qrcode' not in body_html:
+        body_html += f'<p style="text-align:center;margin:1.5em 0;">{QR_IMG_TAG}</p>'
 
     try:
-        send_one(cfg, user['email'], DEFAULT_SUBJECT, body_html, body_text, qr_bytes)
+        send_one(cfg, user['email'], subject, body_html, body_text, qr_bytes)
     except Exception as e:
         _mark_failed(job_id, user_id, str(e)[:500])
         return

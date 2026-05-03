@@ -126,8 +126,10 @@ def settings():
     doors = db.get_doors()
     cameras = db.get_cameras()
     shellys = db.get_shellys()
+    syslog_lines = _log_capture.get_lines(500) if _log_capture else []
     return render_template('settings.html', doors=doors,
                            cameras=cameras, shellys=shellys,
+                           syslog_lines=syslog_lines,
                            version=get_version())
 
 
@@ -620,6 +622,10 @@ def api_email_save():
         'from_email': (data.get('from_email') or '').strip(),
         'from_name': (data.get('from_name') or '').strip(),
         'reply_to': (data.get('reply_to') or '').strip(),
+        # Templates: empty -> defaults from email.py used at send time.
+        'subject_template': data.get('subject_template') or '',
+        'body_html_template': data.get('body_html_template') or '',
+        'body_text_template': data.get('body_text_template') or '',
     }
     if not (cfg['smtp_host'] and cfg['username'] and cfg['password']
             and cfg['from_email']):

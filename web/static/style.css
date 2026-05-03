@@ -314,6 +314,49 @@ td { font-size: 0.9rem; }
 .user-row-inactive { opacity: 0.5; }
 .user-row-inactive td { color: #888; }
 
+/* Forms inside settings panels: stack labels above inputs (otherwise
+   <label> is inline by default and the form renders one big sentence). */
+.panel form label,
+.panel form > label {
+    display: block;
+    margin-top: 0.7rem;
+    margin-bottom: 0.2rem;
+    color: #888;
+    font-size: 0.82rem;
+    font-weight: 500;
+}
+.panel form input[type="text"],
+.panel form input[type="email"],
+.panel form input[type="password"],
+.panel form input[type="number"],
+.panel form input[type="tel"],
+.panel form select,
+.panel form textarea {
+    width: 100%;
+    max-width: 480px;
+    padding: 0.4rem 0.55rem;
+    background: #1a1a1a;
+    color: #e0e0e0;
+    border: 1px solid #333;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    font-family: inherit;
+    box-sizing: border-box;
+}
+.panel form textarea {
+    min-height: 6rem;
+    resize: vertical;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.85rem;
+    max-width: 640px;
+}
+.panel form input:focus,
+.panel form textarea:focus,
+.panel form select:focus {
+    outline: 1px solid #4ade80;
+    border-color: #4ade80;
+}
+
 /* Settings tabs */
 .settings-tabs {
     display: flex;
