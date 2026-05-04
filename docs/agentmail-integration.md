@@ -24,8 +24,8 @@ SOC 2 claimed; deliverability not yet third-party benchmarked.
 
 | | Gmail SMTP (current) | AgentMail |
 |---|---|---|
-| Auth setup | Enable 2FA, create 16-char App Password, paste | Paste a single Bearer API key |
-| From address | Real human Gmail account | Auto-issued `*@agentmail.to` for free, custom domain on $20/mo plan |
+| Auth setup | Enable 2FA, create 16-char App Password, paste | Paste a single Bearer API key + the inbox email |
+| From address | Real human Gmail account | Pre-created `*@agentmail.to` for free, custom domain on $20/mo plan |
 | Inbound replies | Land in the human's Gmail; no programmatic feed | Webhook-pushed into qr-access via Svix-signed `POST` |
 | Per-tenant isolation | One inbox shared by everyone the admin emails | Per-integration inbox |
 | Volume @ free tier | ~500/day | 3,000/mo |
@@ -38,17 +38,22 @@ dashboard" feature ~5x cheaper to build than rolling our own IMAP.
 
 ## What we'd need from the admin
 
-Minimum: paste an `AgentMail API key` (`am_...`) from
-https://console.agentmail.to. The qr-access worker will call
-`POST /v0/inboxes` once on first send to create a provisioned inbox
-under `*@agentmail.to` and store its `inbox_id` in `app_settings`.
+Two paste-pairs, both from https://console.agentmail.to:
 
-If the admin later wants a custom-domain From address
-(`qr@yourhoa.com`), they set that up entirely in AgentMail's console
-- DNS verification + their paid Developer plan. **No change on our
-side**: we send through the same `inbox_id`, AgentMail just stamps
-the verified custom address on outbound mail. So this plan covers
-both default and custom domains from day one.
+1. **Create an inbox** (Inboxes -> Create). AgentMail returns an email
+   like `qr-access@agentmail.to`. Or set up a custom domain there
+   (Developer plan + DNS verification) to send from
+   `qr@yourhoa.com` - no change on our side either way.
+2. **Create an inbox-scoped API key** for that inbox (API Keys ->
+   Create). Inbox-scoped is the common case in AgentMail's UI.
+
+Paste the API key in **Settings -> Email -> AgentMail** and the inbox
+email in **From email**. That's the whole config.
+
+We deliberately **do not** call `POST /v0/inboxes` from the worker:
+inbox-scoped keys 403 on that endpoint, and asking the admin for an
+org-scoped key (more privileges) just to skip a one-time console
+step is the wrong tradeoff.
 
 ## Architecture: provider abstraction in the email service
 
@@ -59,6 +64,7 @@ both default and custom domains from day one.
 web/services/email_providers/
     __init__.py          - registry: PROVIDERS = {'smtp': SmtpProvider, 'agentmail': AgentMailProvider}
     base.py              - class EmailProvider: send_one(to, subject, html, text, qr_png_bytes)
+                           + classified exceptions (RateLimit/Transient/Permanent)
     smtp.py              - existing smtplib code, lifted into a class
     agentmail.py         - new
 ```
@@ -76,18 +82,10 @@ import requests
 
 API_BASE = 'https://api.agentmail.to/v0'
 
-class AgentMailProvider:
-    def __init__(self, cfg):
-        self.api_key = cfg['agentmail_api_key']
-        self.inbox_id = cfg.get('agentmail_inbox_id') or self._provision_inbox()
-        self.from_name = cfg.get('from_name', '')
-
-    def _provision_inbox(self):
-        # POST /v0/inboxes -> returns {inbox_id, address}
-        # Caller persists inbox_id back into app_settings.
-        ...
-
+class AgentMailProvider(EmailProvider):
     def send_one(self, to_email, subject, html, text, qr_png_bytes, reply_to=None):
+        # cfg['from_email'] IS the inbox identifier in AgentMail's URL.
+        inbox_id = self.cfg['from_email']
         body = {
             'to': to_email,
             'subject': subject,
@@ -103,12 +101,15 @@ class AgentMailProvider:
         }
         if reply_to:
             body['reply_to'] = reply_to
-        r = requests.post(
-            f'{API_BASE}/inboxes/{self.inbox_id}/messages/send',
-            json=body, timeout=30,
-            headers={'Authorization': f'Bearer {self.api_key}'})
-        r.raise_for_status()
+        self._http('POST',
+                    f'{API_BASE}/inboxes/{inbox_id}/messages/send',
+                    json=body)
 ```
+
+`_http` handles status-code -> classified exception mapping
+(`RateLimitError` for 429, `PermanentError` for 401/403/4xx,
+`TransientError` for 5xx and network errors) so the worker's retry
+logic doesn't need to know which provider failed.
 
 CID-inline attachment is wire-compatible with what we already produce
 for SMTP, so the existing default HTML body (`<img src="cid:qrcode">`)
@@ -123,14 +124,15 @@ works unchanged.
   "provider": "smtp",                    // or "agentmail"
   "smtp_host": "...", "username": "...", "password": "...",  // when provider=smtp
   "agentmail_api_key": "am_...",         // when provider=agentmail
-  "agentmail_inbox_id": "inb_...",       // populated lazily on first send
   "from_email": "...", "from_name": "...", "reply_to": "...",
   "subject_template": "...", "body_html_template": "...", "body_text_template": "..."
 }
 ```
 
-`from_email` becomes optional when `provider=agentmail` and no custom
-domain is configured (the inbox's auto-issued address is used).
+`from_email` is required for both providers. For SMTP it's the From
+address; for AgentMail it's the From address AND the inbox identifier
+(same thing - the email of the inbox you created in the AgentMail
+console).
 
 ## Settings UI changes
 
@@ -145,12 +147,9 @@ exactly as today; AgentMail block is just:
 
 ```
 API key: [____________________________]            [?]
-   ?-tooltip: 'Get one at console.agentmail.to. Free
-              plan covers 3,000 emails/month.'
-
-Inbox: (auto-created on first send)
-       qr-access-<random>@agentmail.to     [Disconnect]
-       (or: <hoa>.agentmail.to once verified custom domain)
+   ?-tooltip: 'Create an inbox + an inbox-scoped API key
+              at console.agentmail.to. Paste the key here
+              and the inbox email in From email below.'
 ```
 
 Templates + Send Test panels are shared across providers - they don't
@@ -218,7 +217,7 @@ admin reads them there.
 | Method | Path | Notes |
 |---|---|---|
 | GET  | `/api/integrations/email` | Returns provider + provider-specific masked status |
-| POST | `/api/integrations/email` | Body includes `provider` + the matching subset of fields. Validation: SMTP requires host+user+pass+from; AgentMail requires api_key |
+| POST | `/api/integrations/email` | Body includes `provider` + the matching subset of fields. Validation: SMTP requires host+user+pass+from_email; AgentMail requires api_key+from_email |
 | POST | `/api/integrations/email/test` | Routes to the right provider's `send_one` |
 | POST | `/api/users/<id>/email-qr` | Unchanged - worker reads provider from cfg |
 | POST | `/api/users/email-qr-batch` | Unchanged |
@@ -226,13 +225,15 @@ admin reads them there.
 
 ## E2e
 
-**Provider tests** - mirror the SMTP approach: monkey-patch
-`requests.post` (or use `responses`) in `tests/e2e/test_email_api.py`
-to capture what the AgentMail provider would have sent; assert
-`Authorization` header, URL, base64'd attachment, CID. No network.
+**Provider tests** - mirror the SMTP approach: `responses`-mocked
+HTTP in `tests/e2e/test_email_agentmail.py` to capture what the
+AgentMail provider would have sent; assert `Authorization` header,
+URL, base64'd attachment, CID. No network. Includes
+`test_agentmail_never_calls_create_inbox` to lock in that we never
+hit `POST /v0/inboxes` (would 403 on inbox-scoped keys).
 
-**Retry-mechanism tests** (new file, provider-agnostic - tests the
-worker against a stub provider that throws on demand):
+**Retry-mechanism tests** (provider-agnostic - tests the worker
+against a stub provider that throws on demand):
 
 - `test_rate_limit_defers_with_long_backoff` - stub raises
   `RateLimitError` (HTTP 429). Assert: `status='queued'`,
@@ -240,17 +241,15 @@ worker against a stub provider that throws on demand):
   call attempted on the next worker tick (because next_retry_at
   hasn't elapsed).
 - `test_transient_error_retries_then_fails_at_max` - stub raises
-  `ConnectionError` 6 times. Assert: attempts climbs 1..5, then on
-  the 6th `status='failed'` and `error` populated.
-- `test_permanent_error_fails_immediately` - stub raises a 4xx
-  classified as "bad address". Assert: `attempts=1`,
-  `status='failed'`, no retry scheduled.
-- `test_worker_picks_up_due_retries_on_simulated_restart` - insert
-  a row with `status='queued'`, `attempts=2`, `next_retry_at` set
-  10s ago. Worker (started fresh) pops it on its next tick.
+  `TransientError` repeatedly. Assert: attempts climbs to
+  `MAX_TRANSIENT_ATTEMPTS`, then `status='failed'`.
+- `test_permanent_error_fails_immediately` - stub raises a
+  `PermanentError`. Assert: `status='failed'` after the first try,
+  no retry scheduled.
+- `test_worker_picks_up_due_retries_on_simulated_restart` - row
+  with elapsed `next_retry_at`. Worker (called fresh) pops it.
 - `test_worker_skips_not_yet_due_retries` - same setup but
-  `next_retry_at` 1h in the future. Worker query returns nothing;
-  the row stays untouched.
+  `next_retry_at` 1h in the future. Worker query returns nothing.
 - `test_attempts_counter_persists_across_workers` - process_job
   fails once, then a second worker instance picks it up and sees
   `attempts=1` in the row (i.e. counter survives the restart).
@@ -264,11 +263,14 @@ worker against a stub provider that throws on demand):
   `.bounced`) flowing back into our `email_jobs` table
 - AWS SES, SendGrid, Postmark, etc. as a third/fourth provider -
   trivial once the abstraction exists, but not until someone needs them
+- Auto-provisioning AgentMail inboxes via `POST /v0/inboxes` - the
+  console UX is one extra paste-pair, vs requiring an org-scoped key
+  (more privileges) and writing inbox_id state back into config.
 
 ## Phasing
 
 1. **v1**: provider abstraction + AgentMail send path + UI radio +
-   retry/backoff worker. No inbound. ~350 LOC + ~8 e2e tests. Ship
+   retry/backoff worker. No inbound. ~350 LOC + 13 e2e tests. Ship
    as one image bump.
 2. **v2**: inbound replies in the dashboard - separate plan when we
    get there.

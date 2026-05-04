@@ -93,7 +93,10 @@ def is_configured() -> bool:
         return bool(c.get('smtp_host') and c.get('username')
                      and c.get('password') and c.get('from_email'))
     if provider == 'agentmail':
-        return bool(c.get('agentmail_api_key'))
+        # from_email doubles as the AgentMail inbox identifier - the
+        # admin pastes the inbox they pre-created in the AgentMail
+        # console. We never auto-provision.
+        return bool(c.get('agentmail_api_key') and c.get('from_email'))
     return False
 
 
@@ -112,7 +115,6 @@ def public_status() -> dict:
         'username': c.get('username', ''),
         'has_password': bool(c.get('password')),
         # AgentMail fields
-        'agentmail_inbox_id': c.get('agentmail_inbox_id', ''),
         'has_agentmail_api_key': bool(c.get('agentmail_api_key')),
         # Shared
         'from_email': c.get('from_email', ''),
@@ -127,19 +129,8 @@ def public_status() -> dict:
     }
 
 
-def _on_inbox_provisioned(inbox_id: str) -> None:
-    """Callback for AgentMailProvider when it auto-creates an inbox.
-    Persists the id so future sends reuse it."""
-    cfg = get_config() or {}
-    if cfg.get('agentmail_inbox_id') == inbox_id:
-        return
-    cfg = dict(cfg)
-    cfg['agentmail_inbox_id'] = inbox_id
-    db.set_setting('email.config', cfg)
-
-
 def _provider_for(cfg: dict) -> EmailProvider:
-    return build_provider(cfg, on_inbox_provisioned=_on_inbox_provisioned)
+    return build_provider(cfg)
 
 
 # ---------------------------------------------------------------------------

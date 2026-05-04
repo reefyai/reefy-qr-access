@@ -15,16 +15,12 @@ PROVIDERS = {
 }
 
 
-def build_provider(cfg: dict, on_inbox_provisioned=None) -> EmailProvider:
-    """Instantiate the right provider for this config. AgentMail
-    needs a callback to persist the auto-provisioned inbox_id back
-    into app_settings; other providers ignore extra kwargs."""
+def build_provider(cfg: dict) -> EmailProvider:
+    """Instantiate the right provider for this config."""
     name = (cfg.get('provider') or 'smtp').lower()
     cls = PROVIDERS.get(name)
     if cls is None:
         raise ValueError(f'unknown email provider: {name!r}')
-    if name == 'agentmail':
-        return cls(cfg, on_inbox_provisioned=on_inbox_provisioned)
     return cls(cfg)
 
 

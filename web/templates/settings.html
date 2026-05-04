@@ -192,16 +192,18 @@ avoid spam-filter bursts.">?</button>
 1. Sign up at https://console.agentmail.to
    (free tier: 3,000 emails/month)
 
-2. Generate an API key in the dashboard
-   (starts with am_...)
+2. Create an inbox in the AgentMail
+   dashboard (Inboxes -> Create). You'll
+   get an email like name@agentmail.to.
+   To use your own domain (e.g.
+   qr@yourhoa.com), set up a custom
+   domain there too - no change here.
 
-3. Paste it below + Save.
+3. Create an inbox-scoped API key for
+   that inbox (API Keys -> Create).
 
-The first send auto-creates an inbox at
-*@agentmail.to. To send from your own
-domain (e.g. qr@yourhoa.com), set up a
-custom domain in AgentMail's console -
-no change needed on this side.
+4. Paste the API key below + put the
+   inbox email into From email + Save.
 
 Free-tier daily cap is 100 messages; the
 worker auto-defers excess sends with hour-
@@ -212,8 +214,8 @@ admin involvement.">?</button>
                 <label>API key</label>
                 <input type="password" name="agentmail_api_key" id="email-agentmail-api-key"
                        placeholder="am_..." autocomplete="off">
-                <div id="email-agentmail-inbox-row" style="margin-top:0.4rem;color:#888;font-size:0.85em;display:none;">
-                    Inbox: <code id="email-agentmail-inbox-id"></code>
+                <div style="margin-top:0.4rem;color:#888;font-size:0.85em;">
+                    The inbox email goes in <em>From email</em> below.
                 </div>
             </div>
 
@@ -521,7 +523,7 @@ async function emailLoadStatus() {
         el.innerHTML = '<div style="color:#aaa;">Not configured yet. Pick a provider below, fill its fields, and click Save.</div>';
     } else {
         const detail = d.provider === 'agentmail'
-            ? `via AgentMail${d.agentmail_inbox_id ? ', inbox ' + d.agentmail_inbox_id : ''}${d.from_email ? ', From: ' + d.from_email : ''}`
+            ? `via AgentMail inbox ${d.from_email}`
             : `via SMTP ${d.smtp_host} as ${d.username}, From: ${d.from_email}`;
         el.innerHTML = `<div style="padding:0.6rem 0.8rem;background:#0f1f0f;border:1px solid #2d6a2d;border-radius:6px;color:#86efac;">
             <strong>✓ Connected</strong> &nbsp; <span style="color:#9bd6a0;font-size:0.85em;">${detail}</span>
@@ -542,10 +544,6 @@ async function emailLoadStatus() {
     // AgentMail
     if (d.has_agentmail_api_key) {
         document.getElementById('email-agentmail-api-key').placeholder = '(saved - leave blank to keep)';
-    }
-    if (d.agentmail_inbox_id) {
-        document.getElementById('email-agentmail-inbox-id').textContent = d.agentmail_inbox_id;
-        document.getElementById('email-agentmail-inbox-row').style.display = '';
     }
 
     if (d.from_name)  document.getElementById('email-from-name').value  = d.from_name;
@@ -588,7 +586,6 @@ function emailDisconnect() {
              'email-from-name','email-from-email']
                 .forEach(id => { document.getElementById(id).value = ''; });
             document.getElementById('email-smtp-port').value = 587;
-            document.getElementById('email-agentmail-inbox-row').style.display = 'none';
             emailLoadStatus();
             emailMsg('Disconnected.', 'success');
         });

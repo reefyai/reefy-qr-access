@@ -694,11 +694,13 @@ def api_email_save():
         cfg.update({
             'agentmail_api_key': (data.get('agentmail_api_key') or '').strip()
                                   or saved.get('agentmail_api_key', ''),
-            # Persist any inbox_id we previously auto-provisioned.
-            'agentmail_inbox_id': saved.get('agentmail_inbox_id', ''),
         })
-        if not cfg['agentmail_api_key']:
-            return jsonify(error='agentmail_api_key is required'), 400
+        # from_email doubles as the AgentMail inbox identifier - admin
+        # paste-pairs it with the inbox-scoped API key from the
+        # AgentMail console.
+        if not (cfg['agentmail_api_key'] and cfg['from_email']):
+            return jsonify(
+                error='agentmail_api_key and from_email are required'), 400
     else:
         return jsonify(error=f'unknown provider: {provider!r}'), 400
 
@@ -739,10 +741,10 @@ def api_email_test():
         cfg.update({
             'agentmail_api_key': (data.get('agentmail_api_key')
                                     or saved.get('agentmail_api_key') or '').strip(),
-            'agentmail_inbox_id': saved.get('agentmail_inbox_id', ''),
         })
-        if not cfg['agentmail_api_key']:
-            return jsonify(error='agentmail_api_key is required'), 400
+        if not (cfg['agentmail_api_key'] and cfg['from_email']):
+            return jsonify(
+                error='AgentMail credentials incomplete'), 400
     else:
         return jsonify(error=f'unknown provider: {provider!r}'), 400
 
