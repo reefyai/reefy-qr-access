@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS email_jobs (
     subject TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'queued',
     error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TEXT,
     queued_at TEXT NOT NULL DEFAULT (datetime('now')),
     started_at TEXT,
     finished_at TEXT
@@ -184,6 +186,16 @@ def init_db():
     log_cols = [r[1] for r in db.execute("PRAGMA table_info(access_log)").fetchall()]
     if 'thumbnail_path' not in log_cols:
         db.execute("ALTER TABLE access_log ADD COLUMN thumbnail_path TEXT DEFAULT NULL")
+
+    # Migrate email_jobs: attempts + next_retry_at for the worker's
+    # backoff/retry path. Rate-limited or transient failures stay
+    # status='queued' but with a future next_retry_at.
+    if db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='email_jobs'").fetchone():
+        ej_cols = [r[1] for r in db.execute("PRAGMA table_info(email_jobs)").fetchall()]
+        if 'attempts' not in ej_cols:
+            db.execute("ALTER TABLE email_jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+        if 'next_retry_at' not in ej_cols:
+            db.execute("ALTER TABLE email_jobs ADD COLUMN next_retry_at TEXT")
 
     # Migrate users table: add columns introduced for external-source sync.
     # Must run BEFORE the index below, which references external_user_id.

@@ -123,8 +123,30 @@
 <!-- ========================================================== -->
 <section class="settings-pane" data-pane="email">
     <div class="panel">
-        <h3>SMTP relay
-            <button class="help" type="button" data-help="Gmail SMTP setup:
+        <h3>Email provider</h3>
+
+        <div id="email-status" style="margin-bottom:0.8rem;font-size:0.9em;color:#aaa;">
+            Loading status...
+        </div>
+
+        <form id="email-form" onsubmit="event.preventDefault(); emailSave()">
+            <label>Provider</label>
+            <div style="display:flex;gap:1.2rem;margin:0.3rem 0 0.8rem;">
+                <label style="display:inline-flex;align-items:center;gap:0.4rem;color:#e0e0e0;font-weight:400;font-size:0.9rem;margin:0;">
+                    <input type="radio" name="provider" value="smtp" id="email-provider-smtp" onchange="emailRenderProvider()" checked>
+                    SMTP
+                </label>
+                <label style="display:inline-flex;align-items:center;gap:0.4rem;color:#e0e0e0;font-weight:400;font-size:0.9rem;margin:0;">
+                    <input type="radio" name="provider" value="agentmail" id="email-provider-agentmail" onchange="emailRenderProvider()">
+                    AgentMail
+                </label>
+            </div>
+
+            <!-- SMTP fields (visible when provider=smtp) -->
+            <div id="email-smtp-fields">
+                <h4 style="margin:0.6rem 0 0.3rem;color:#aaa;font-weight:500;font-size:0.9rem;">
+                    SMTP relay
+                    <button class="help" type="button" data-help="Gmail SMTP setup:
 
 1. Enable 2-Step Verification on your Google account.
 
@@ -144,33 +166,63 @@
 For ~120-resident batches you are well under Gmail's
 500/day limit; the worker paces ~1s between sends to
 avoid spam-filter bursts.">?</button>
-        </h3>
+                </h4>
+                <label>SMTP host</label>
+                <input type="text" name="smtp_host" id="email-smtp-host"
+                       placeholder="smtp.gmail.com" autocomplete="off">
 
-        <div id="email-status" style="margin-bottom:0.8rem;font-size:0.9em;color:#aaa;">
-            Loading status...
-        </div>
+                <label>Port</label>
+                <input type="number" name="smtp_port" id="email-smtp-port" value="587" min="1" max="65535">
 
-        <form id="email-form" onsubmit="event.preventDefault(); emailSave()">
-            <label>SMTP host</label>
-            <input type="text" name="smtp_host" id="email-smtp-host"
-                   placeholder="smtp.gmail.com" autocomplete="off">
+                <label>Username</label>
+                <input type="text" name="username" id="email-username"
+                       placeholder="your.address@gmail.com" autocomplete="off">
 
-            <label>Port</label>
-            <input type="number" name="smtp_port" id="email-smtp-port" value="587" min="1" max="65535">
+                <label>Password / App password</label>
+                <input type="password" name="password" id="email-password"
+                       placeholder="(leave blank to keep saved password)" autocomplete="off">
+            </div>
 
-            <label>Username</label>
-            <input type="text" name="username" id="email-username"
-                   placeholder="your.address@gmail.com" autocomplete="off">
+            <!-- AgentMail fields (visible when provider=agentmail) -->
+            <div id="email-agentmail-fields" style="display:none;">
+                <h4 style="margin:0.6rem 0 0.3rem;color:#aaa;font-weight:500;font-size:0.9rem;">
+                    AgentMail
+                    <button class="help" type="button" data-help="AgentMail setup:
 
-            <label>Password / App password</label>
-            <input type="password" name="password" id="email-password"
-                   placeholder="(leave blank to keep saved password)" autocomplete="off">
+1. Sign up at https://console.agentmail.to
+   (free tier: 3,000 emails/month)
 
+2. Generate an API key in the dashboard
+   (starts with am_...)
+
+3. Paste it below + Save.
+
+The first send auto-creates an inbox at
+*@agentmail.to. To send from your own
+domain (e.g. qr@yourhoa.com), set up a
+custom domain in AgentMail's console -
+no change needed on this side.
+
+Free-tier daily cap is 100 messages; the
+worker auto-defers excess sends with hour-
+scale backoff so a 120-resident initial
+blast drains over the next day with no
+admin involvement.">?</button>
+                </h4>
+                <label>API key</label>
+                <input type="password" name="agentmail_api_key" id="email-agentmail-api-key"
+                       placeholder="am_..." autocomplete="off">
+                <div id="email-agentmail-inbox-row" style="margin-top:0.4rem;color:#888;font-size:0.85em;display:none;">
+                    Inbox: <code id="email-agentmail-inbox-id"></code>
+                </div>
+            </div>
+
+            <h4 style="margin:1rem 0 0.3rem;color:#aaa;font-weight:500;font-size:0.9rem;">From identity</h4>
             <label>From name</label>
             <input type="text" name="from_name" id="email-from-name"
                    placeholder="Building Manager">
 
-            <label>From email</label>
+            <label>From email <span id="email-from-hint" style="color:#888;font-weight:400;font-size:0.82em;"></span></label>
             <input type="email" name="from_email" id="email-from-email"
                    placeholder="manager@example.com">
 
@@ -418,18 +470,47 @@ function emailMsg(text, kind) {
                      kind === 'success' ? '#22c55e' : '#888';
 }
 
+function emailCurrentProvider() {
+    const r = document.querySelector('input[name="provider"]:checked');
+    return r ? r.value : 'smtp';
+}
+
+function emailRenderProvider() {
+    const p = emailCurrentProvider();
+    document.getElementById('email-smtp-fields').style.display = p === 'smtp' ? '' : 'none';
+    document.getElementById('email-agentmail-fields').style.display = p === 'agentmail' ? '' : 'none';
+    const hint = document.getElementById('email-from-hint');
+    if (p === 'agentmail') {
+        hint.textContent = '(optional - leave blank to use the auto-issued *@agentmail.to address)';
+    } else {
+        hint.textContent = '(required)';
+    }
+}
+
 function emailFormPayload() {
-    return {
-        smtp_host: document.getElementById('email-smtp-host').value.trim(),
-        smtp_port: parseInt(document.getElementById('email-smtp-port').value) || 587,
-        username: document.getElementById('email-username').value.trim(),
-        password: document.getElementById('email-password').value.trim(),
+    const provider = emailCurrentProvider();
+    const base = {
+        provider,
         from_name: document.getElementById('email-from-name').value.trim(),
         from_email: document.getElementById('email-from-email').value.trim(),
         subject_template: document.getElementById('email-subject').value,
         body_html_template: document.getElementById('email-body-html').value,
         body_text_template: document.getElementById('email-body-text').value,
     };
+    if (provider === 'smtp') {
+        return {
+            ...base,
+            smtp_host: document.getElementById('email-smtp-host').value.trim(),
+            smtp_port: parseInt(document.getElementById('email-smtp-port').value) || 587,
+            username: document.getElementById('email-username').value.trim(),
+            password: document.getElementById('email-password').value.trim(),
+        };
+    } else {
+        return {
+            ...base,
+            agentmail_api_key: document.getElementById('email-agentmail-api-key').value.trim(),
+        };
+    }
 }
 
 async function emailLoadStatus() {
@@ -437,26 +518,42 @@ async function emailLoadStatus() {
     const d = await res.json();
     const el = document.getElementById('email-status');
     if (!d.configured) {
-        el.innerHTML = '<div style="color:#aaa;">Not configured yet. Fill SMTP details below and click Save.</div>';
+        el.innerHTML = '<div style="color:#aaa;">Not configured yet. Pick a provider below, fill its fields, and click Save.</div>';
     } else {
+        const detail = d.provider === 'agentmail'
+            ? `via AgentMail${d.agentmail_inbox_id ? ', inbox ' + d.agentmail_inbox_id : ''}${d.from_email ? ', From: ' + d.from_email : ''}`
+            : `via SMTP ${d.smtp_host} as ${d.username}, From: ${d.from_email}`;
         el.innerHTML = `<div style="padding:0.6rem 0.8rem;background:#0f1f0f;border:1px solid #2d6a2d;border-radius:6px;color:#86efac;">
-            <strong>✓ Connected</strong> &nbsp; <span style="color:#9bd6a0;font-size:0.85em;">${d.smtp_host} as ${d.username}, From: ${d.from_email}</span>
+            <strong>✓ Connected</strong> &nbsp; <span style="color:#9bd6a0;font-size:0.85em;">${detail}</span>
         </div>`;
     }
-    // Pre-fill the visible fields (Password stays blank by design).
+    // Switch the radio + show only the matching provider's fields.
+    const providerRadio = document.getElementById('email-provider-' + (d.provider || 'smtp'));
+    if (providerRadio) providerRadio.checked = true;
+    emailRenderProvider();
+
+    // Pre-fill SMTP fields (Password stays blank by design).
     if (d.smtp_host)  document.getElementById('email-smtp-host').value  = d.smtp_host;
     if (d.smtp_port)  document.getElementById('email-smtp-port').value  = d.smtp_port;
     if (d.username)   document.getElementById('email-username').value   = d.username;
-    if (d.from_name)  document.getElementById('email-from-name').value  = d.from_name;
-    if (d.from_email) document.getElementById('email-from-email').value = d.from_email;
     if (d.has_password) {
         document.getElementById('email-password').placeholder = '(saved - leave blank to keep)';
     }
+    // AgentMail
+    if (d.has_agentmail_api_key) {
+        document.getElementById('email-agentmail-api-key').placeholder = '(saved - leave blank to keep)';
+    }
+    if (d.agentmail_inbox_id) {
+        document.getElementById('email-agentmail-inbox-id').textContent = d.agentmail_inbox_id;
+        document.getElementById('email-agentmail-inbox-row').style.display = '';
+    }
+
+    if (d.from_name)  document.getElementById('email-from-name').value  = d.from_name;
+    if (d.from_email) document.getElementById('email-from-email').value = d.from_email;
     document.getElementById('email-disconnect-btn').style.display = d.configured ? '' : 'none';
-    // Pre-fill template fields with the saved value, falling back to
-    // the built-in defaults so the textareas show editable starter
-    // content (greyed-out placeholders are easy to miss + harder to
-    // tweak than real values).
+
+    // Templates: pre-fill with built-in defaults so admins edit real
+    // text instead of greyed-out placeholders.
     document.getElementById('email-subject').value = d.subject_template || d.default_subject || '';
     document.getElementById('email-body-html').value = d.body_html_template || d.default_body_html || '';
     document.getElementById('email-body-text').value = d.body_text_template || d.default_body_text || '';
@@ -464,7 +561,10 @@ async function emailLoadStatus() {
 
 async function emailSave() {
     const payload = emailFormPayload();
-    if (!payload.password) delete payload.password;   // keep saved
+    // Empty secret means "keep saved" - drop from payload so backend
+    // falls back to the persisted value.
+    if (!payload.password) delete payload.password;
+    if (!payload.agentmail_api_key) delete payload.agentmail_api_key;
     emailMsg('Saving...');
     const res = await fetch('/api/integrations/email', {
         method: 'POST',
@@ -483,9 +583,12 @@ function emailDisconnect() {
         async () => {
             const res = await fetch('/api/integrations/email', {method: 'DELETE'});
             if (!res.ok) { emailMsg('Disconnect failed', 'error'); return; }
-            ['email-smtp-host','email-username','email-password','email-from-name','email-from-email']
+            ['email-smtp-host','email-username','email-password',
+             'email-agentmail-api-key',
+             'email-from-name','email-from-email']
                 .forEach(id => { document.getElementById(id).value = ''; });
             document.getElementById('email-smtp-port').value = 587;
+            document.getElementById('email-agentmail-inbox-row').style.display = 'none';
             emailLoadStatus();
             emailMsg('Disconnected.', 'success');
         });

@@ -646,11 +646,10 @@ def api_email_status():
 @app.route('/api/integrations/email', methods=['DELETE'])
 @login_required
 def api_email_disconnect():
-    """Wipe saved SMTP config so admin can replace it from a clean slate.
-    Doesn't touch templates - those persist for re-use after reconnect."""
+    """Wipe saved provider config so admin can replace it cleanly.
+    Keeps templates so they survive a reconnect."""
     saved = db.get_setting('email.config') or {}
     db.set_setting('email.config', {
-        # Keep the templates; clear the connection fields.
         'subject_template': saved.get('subject_template', ''),
         'body_html_template': saved.get('body_html_template', ''),
         'body_text_template': saved.get('body_text_template', ''),
@@ -661,27 +660,48 @@ def api_email_disconnect():
 @app.route('/api/integrations/email', methods=['POST'])
 @login_required
 def api_email_save():
-    """Save SMTP config. Empty password keeps the saved one (lets the
-    admin tweak Client ID etc. without re-pasting the App Password)."""
-    from .services.email import send_test
+    """Save provider config. Empty password / api_key keeps the saved
+    value so the admin can tweak other fields without re-pasting the
+    secret. Validates provider-specific required fields before saving."""
     data = request.get_json() or {}
     saved = db.get_setting('email.config') or {}
+    provider = (data.get('provider') or saved.get('provider') or 'smtp').lower()
+
+    # Common fields (templates + From identity) survive across providers.
     cfg = {
-        'smtp_host': (data.get('smtp_host') or '').strip(),
-        'smtp_port': int(data.get('smtp_port') or 587),
-        'username': (data.get('username') or '').strip(),
-        'password': (data.get('password') or '').strip() or saved.get('password', ''),
+        'provider': provider,
         'from_email': (data.get('from_email') or '').strip(),
         'from_name': (data.get('from_name') or '').strip(),
         'reply_to': (data.get('reply_to') or '').strip(),
-        # Templates: empty -> defaults from email.py used at send time.
         'subject_template': data.get('subject_template') or '',
         'body_html_template': data.get('body_html_template') or '',
         'body_text_template': data.get('body_text_template') or '',
     }
-    if not (cfg['smtp_host'] and cfg['username'] and cfg['password']
-            and cfg['from_email']):
-        return jsonify(error='smtp_host, username, password, from_email are required'), 400
+
+    if provider == 'smtp':
+        cfg.update({
+            'smtp_host': (data.get('smtp_host') or '').strip(),
+            'smtp_port': int(data.get('smtp_port') or 587),
+            'username': (data.get('username') or '').strip(),
+            'password': (data.get('password') or '').strip()
+                         or saved.get('password', ''),
+        })
+        if not (cfg['smtp_host'] and cfg['username'] and cfg['password']
+                and cfg['from_email']):
+            return jsonify(
+                error='smtp_host, username, password, from_email are required'), 400
+    elif provider == 'agentmail':
+        cfg.update({
+            'agentmail_api_key': (data.get('agentmail_api_key') or '').strip()
+                                  or saved.get('agentmail_api_key', ''),
+            # Persist any inbox_id we previously auto-provisioned.
+            'agentmail_inbox_id': saved.get('agentmail_inbox_id', ''),
+        })
+        if not cfg['agentmail_api_key']:
+            return jsonify(error='agentmail_api_key is required'), 400
+    else:
+        return jsonify(error=f'unknown provider: {provider!r}'), 400
+
     db.set_setting('email.config', cfg)
     return jsonify(ok=True)
 
@@ -689,26 +709,43 @@ def api_email_save():
 @app.route('/api/integrations/email/test', methods=['POST'])
 @login_required
 def api_email_test():
-    """Send a probe email to whatever address the admin types. Doesn't
-    persist anything; uses the just-submitted creds (or saved if any
-    field omitted)."""
+    """Send a probe email via the configured provider. Body fields
+    override saved config so the admin can preview without saving;
+    omitted fields fall back to whatever's persisted."""
     from .services.email import send_test
     data = request.get_json() or {}
     saved = db.get_setting('email.config') or {}
-    cfg = {
-        'smtp_host': (data.get('smtp_host') or saved.get('smtp_host') or '').strip(),
-        'smtp_port': int(data.get('smtp_port') or saved.get('smtp_port') or 587),
-        'username': (data.get('username') or saved.get('username') or '').strip(),
-        'password': (data.get('password') or saved.get('password') or '').strip(),
-        'from_email': (data.get('from_email') or saved.get('from_email') or '').strip(),
-        'from_name': (data.get('from_name') or saved.get('from_name') or '').strip(),
-    }
+    provider = (data.get('provider') or saved.get('provider') or 'smtp').lower()
     to_email = (data.get('to_email') or '').strip()
     if not to_email:
         return jsonify(error='to_email is required'), 400
-    if not (cfg['smtp_host'] and cfg['username'] and cfg['password']
-            and cfg['from_email']):
-        return jsonify(error='SMTP credentials incomplete'), 400
+
+    cfg = {
+        'provider': provider,
+        'from_email': (data.get('from_email') or saved.get('from_email') or '').strip(),
+        'from_name': (data.get('from_name') or saved.get('from_name') or '').strip(),
+    }
+    if provider == 'smtp':
+        cfg.update({
+            'smtp_host': (data.get('smtp_host') or saved.get('smtp_host') or '').strip(),
+            'smtp_port': int(data.get('smtp_port') or saved.get('smtp_port') or 587),
+            'username': (data.get('username') or saved.get('username') or '').strip(),
+            'password': (data.get('password') or saved.get('password') or '').strip(),
+        })
+        if not (cfg['smtp_host'] and cfg['username'] and cfg['password']
+                and cfg['from_email']):
+            return jsonify(error='SMTP credentials incomplete'), 400
+    elif provider == 'agentmail':
+        cfg.update({
+            'agentmail_api_key': (data.get('agentmail_api_key')
+                                    or saved.get('agentmail_api_key') or '').strip(),
+            'agentmail_inbox_id': saved.get('agentmail_inbox_id', ''),
+        })
+        if not cfg['agentmail_api_key']:
+            return jsonify(error='agentmail_api_key is required'), 400
+    else:
+        return jsonify(error=f'unknown provider: {provider!r}'), 400
+
     try:
         send_test(cfg, to_email)
     except Exception as e:

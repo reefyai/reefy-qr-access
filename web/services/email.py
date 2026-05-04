@@ -1,24 +1,26 @@
-"""SMTP email delivery: config, queue worker, send-one helper.
+"""Email delivery: config, queue worker, retry/backoff.
 
-See docs/email-delivery.md for design. v1 scope:
- - per-user `[Email]` button enqueues a job
- - background worker picks queued jobs FIFO, sends via SMTP, posts state
-   transitions to the email_bus (-> SSE -> dashboard)
- - hardcoded HTML body with CID-embedded QR PNG (no template UI yet)
+The actual send logic lives in `email_providers/*.py` (SMTP /
+AgentMail). This module owns: queue, worker loop, error
+classification + retry scheduling, template rendering, dashboard
+event bus.
+
+See docs/email-delivery.md (SMTP) and docs/agentmail-integration.md
+(provider abstraction + retry/backoff).
 """
 
 from __future__ import annotations
 
-import smtplib
-import ssl
 import threading
 import time
-from email.message import EmailMessage
-from email.utils import formataddr
 from pathlib import Path
 
 from .. import db
 from ..events import email_bus
+from .email_providers import (
+    build_provider, EmailProvider,
+    RateLimitError, TransientError, PermanentError,
+)
 
 
 DEFAULT_SUBJECT = 'Your QR access code'
@@ -41,14 +43,27 @@ entrance and the door will unlock. Save it on your phone or print it.
 Keep it private - anyone with the image can open the door.
 """
 
-# Substitutions available in subject + body templates. Admins can write
-# {{ full_name }} (or {full_name}, both work) anywhere in their subject
-# or body to interpolate per-recipient. {{ qr_code }} expands to an
-# inline <img cid:qrcode> tag in the HTML body; if omitted the worker
-# appends the image at the end so the QR is always present.
+# Substitutions available in subject + body templates.
 TEMPLATE_VARS = ['full_name', 'unit_label', 'building',
                  'email', 'phone', 'qr_code']
 
+# Pace consecutive sends so a 100-in-one-second burst doesn't trip
+# spam heuristics on Gmail (and even AgentMail's friendlier limits).
+MIN_INTERVAL_S = 1.0
+
+# Backoff schedules. Rate-limit deferrals are hour-scale because at
+# 100/day the queue naturally drains over the next day - tight retries
+# would burn quota. Transient errors get minute-scale retries; permanent
+# errors don't retry at all.
+RATE_LIMIT_BACKOFF_S = [15 * 60, 60 * 60, 4 * 60 * 60,
+                         12 * 60 * 60, 24 * 60 * 60]
+TRANSIENT_BACKOFF_S = [30, 2 * 60, 10 * 60, 60 * 60]
+MAX_TRANSIENT_ATTEMPTS = len(TRANSIENT_BACKOFF_S) + 1
+
+
+# ---------------------------------------------------------------------------
+# Templates
+# ---------------------------------------------------------------------------
 
 def _render_template(tmpl: str, ctx: dict) -> str:
     """Substitute {{ var }} and {var} placeholders. Unknown placeholders
@@ -60,10 +75,6 @@ def _render_template(tmpl: str, ctx: dict) -> str:
         out = out.replace('{{' + k + '}}', str(v))
         out = out.replace('{' + k + '}', str(v))
     return out
-
-# Pace SMTP sends so a 100-in-one-second burst doesn't trip provider
-# spam heuristics (Gmail in particular). docs/email-delivery.md.
-MIN_INTERVAL_S = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -77,22 +88,35 @@ def get_config() -> dict | None:
 
 def is_configured() -> bool:
     c = get_config() or {}
-    return bool(c.get('smtp_host') and c.get('username')
-                and c.get('password') and c.get('from_email'))
+    provider = (c.get('provider') or 'smtp').lower()
+    if provider == 'smtp':
+        return bool(c.get('smtp_host') and c.get('username')
+                     and c.get('password') and c.get('from_email'))
+    if provider == 'agentmail':
+        return bool(c.get('agentmail_api_key'))
+    return False
 
 
 def public_status() -> dict:
-    """Status payload safe to expose via GET /api/integrations/email -
-    never returns the password."""
+    """Status payload safe to expose - never returns the password
+    or API key. Includes provider-specific masked context so the
+    Settings UI can render the right form."""
     c = get_config() or {}
+    provider = (c.get('provider') or 'smtp').lower()
     return {
         'configured': is_configured(),
+        'provider': provider,
+        # SMTP fields
         'smtp_host': c.get('smtp_host', ''),
         'smtp_port': c.get('smtp_port', 587),
         'username': c.get('username', ''),
+        'has_password': bool(c.get('password')),
+        # AgentMail fields
+        'agentmail_inbox_id': c.get('agentmail_inbox_id', ''),
+        'has_agentmail_api_key': bool(c.get('agentmail_api_key')),
+        # Shared
         'from_email': c.get('from_email', ''),
         'from_name': c.get('from_name', ''),
-        'has_password': bool(c.get('password')),
         'subject_template': c.get('subject_template', ''),
         'body_html_template': c.get('body_html_template', ''),
         'body_text_template': c.get('body_text_template', ''),
@@ -103,63 +127,36 @@ def public_status() -> dict:
     }
 
 
+def _on_inbox_provisioned(inbox_id: str) -> None:
+    """Callback for AgentMailProvider when it auto-creates an inbox.
+    Persists the id so future sends reuse it."""
+    cfg = get_config() or {}
+    if cfg.get('agentmail_inbox_id') == inbox_id:
+        return
+    cfg = dict(cfg)
+    cfg['agentmail_inbox_id'] = inbox_id
+    db.set_setting('email.config', cfg)
+
+
+def _provider_for(cfg: dict) -> EmailProvider:
+    return build_provider(cfg, on_inbox_provisioned=_on_inbox_provisioned)
+
+
 # ---------------------------------------------------------------------------
-# Send one
+# Test send (called by the Send Test button in Settings -> Email)
 # ---------------------------------------------------------------------------
-
-def _build_message(cfg: dict, to_email: str, subject: str,
-                    body_html: str, body_text: str,
-                    qr_png_bytes: bytes) -> EmailMessage:
-    msg = EmailMessage()
-    msg['From'] = formataddr((cfg.get('from_name') or '', cfg['from_email']))
-    msg['To'] = to_email
-    msg['Subject'] = subject
-    if cfg.get('reply_to'):
-        msg['Reply-To'] = cfg['reply_to']
-    msg.set_content(body_text)
-    msg.add_alternative(body_html, subtype='html')
-    # Attach the QR PNG with a Content-ID so the HTML <img src="cid:qrcode">
-    # renders inline (better deliverability than a bare attachment).
-    html_part = msg.get_payload()[1]
-    html_part.add_related(qr_png_bytes, 'image', 'png', cid='<qrcode>')
-    return msg
-
-
-def send_one(cfg: dict, to_email: str, subject: str,
-              body_html: str, body_text: str,
-              qr_png_bytes: bytes) -> None:
-    """Synchronous SMTP send. Raises on failure."""
-    msg = _build_message(cfg, to_email, subject, body_html, body_text, qr_png_bytes)
-    host = cfg['smtp_host']
-    port = int(cfg.get('smtp_port', 587))
-    ctx = ssl.create_default_context()
-    with smtplib.SMTP(host, port, timeout=30) as smtp:
-        smtp.starttls(context=ctx)
-        smtp.login(cfg['username'], cfg['password'])
-        smtp.send_message(msg)
-
 
 def send_test(cfg: dict, to_email: str) -> None:
-    """Probe send used by the Test Connection / Send Test button.
-    Doesn't touch the queue or DB."""
-    sample = ('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAA'
-              'AAYAAjCB0C8AAAAASUVORK5CYII=')
-    import base64
-    png = base64.b64decode(sample)
-    send_one(cfg, to_email,
-              subject='qr-access SMTP test',
-              body_html='<p>SMTP relay configured correctly. This is a test.</p>',
-              body_text='SMTP relay configured correctly. This is a test.',
-              qr_png_bytes=png)
+    _provider_for(cfg).send_test(to_email)
 
 
 # ---------------------------------------------------------------------------
-# Job queue + worker
+# Job queue
 # ---------------------------------------------------------------------------
 
 def enqueue_for_user(user_id: int) -> int | None:
-    """Insert an email_jobs row + token snapshot for a user. Returns the
-    job id, or None if the user has no email or no active token."""
+    """Insert an email_jobs row + token snapshot for a user. Returns
+    the job id, or None if the user has no email or no active token."""
     user = db.get_user(user_id)
     if not user or not user.get('email'):
         return None
@@ -167,13 +164,12 @@ def enqueue_for_user(user_id: int) -> int | None:
     active = [t for t in tokens if t['active']]
     if not active:
         return None
-    token = active[0]   # newest first per get_user_tokens()
-    subject = DEFAULT_SUBJECT
+    token = active[0]
     conn = db.get_db()
     cur = conn.execute(
         "INSERT INTO email_jobs (user_id, token_id, to_email, subject) "
         "VALUES (?, ?, ?, ?)",
-        (user_id, token['id'], user['email'], subject))
+        (user_id, token['id'], user['email'], DEFAULT_SUBJECT))
     db.commit()
     job_id = cur.lastrowid
     email_bus.publish({'type': 'email-job', 'id': job_id, 'user_id': user_id,
@@ -181,9 +177,13 @@ def enqueue_for_user(user_id: int) -> int | None:
     return job_id
 
 
+# ---------------------------------------------------------------------------
+# Worker
+# ---------------------------------------------------------------------------
+
 def _process_job(job: dict) -> None:
-    """Mark sending, send via SMTP, mark sent/failed. Publishes state
-    transitions on the email_bus."""
+    """Mark sending, send via provider, mark sent/failed/retrying.
+    Publishes state transitions on the email_bus."""
     job_id = job['id']
     user_id = job['user_id']
     cfg = get_config()
@@ -203,7 +203,7 @@ def _process_job(job: dict) -> None:
     email_bus.publish({'type': 'email-job', 'id': job_id, 'user_id': user_id,
                         'status': 'sending'})
 
-    # Render the QR PNG fresh from the token (we trust the qr_utils helper).
+    # Render the QR PNG fresh from the token.
     from ..qr_utils import get_qr_path, generate_qr_png
     token_row = conn.execute(
         "SELECT token FROM tokens WHERE id=?", (job['token_id'],)).fetchone()
@@ -216,10 +216,7 @@ def _process_job(job: dict) -> None:
         generate_qr_png(token_str)
     qr_bytes = Path(png_path).read_bytes()
 
-    # Build the per-user template context. unit_label / building come
-    # from the joined external_users row when available; manual users
-    # get blanks. {qr_code} -> inline <img>; HTML template that omits
-    # the placeholder still works because we append the image below.
+    # Build the per-user template context.
     users_full = db.get_users()
     user_full = next((u for u in users_full if u['id'] == user_id), {})
     ctx = {
@@ -230,26 +227,36 @@ def _process_job(job: dict) -> None:
         'building': user_full.get('building') or '',
         'qr_code': QR_IMG_TAG,
     }
-
     subject_tmpl = (cfg.get('subject_template') or '').strip() or DEFAULT_SUBJECT
     body_html_tmpl = (cfg.get('body_html_template') or '').strip() or DEFAULT_BODY_HTML
     body_text_tmpl = (cfg.get('body_text_template') or '').strip() or DEFAULT_BODY_TEXT
 
     subject = _render_template(subject_tmpl, ctx)
     body_html = _render_template(body_html_tmpl, ctx)
-    # Plain-text body: substitute qr_code with a friendly note instead
-    # of raw HTML, since cid:qrcode means nothing in plain text.
     text_ctx = {**ctx, 'qr_code': '[QR code attached as image]'}
     body_text = _render_template(body_text_tmpl, text_ctx)
-    # If the HTML body doesn't reference the QR placeholder, append the
-    # image so the recipient always gets it.
     if 'cid:qrcode' not in body_html:
         body_html += f'<p style="margin:1.5em 0;">{QR_IMG_TAG}</p>'
 
+    # Send via the configured provider. Errors are classified by the
+    # provider into RateLimit/Transient/Permanent so we can pick the
+    # right backoff (or give up).
     try:
-        send_one(cfg, user['email'], subject, body_html, body_text, qr_bytes)
-    except Exception as e:
+        provider = _provider_for(cfg)
+        provider.send_one(user['email'], subject, body_html, body_text, qr_bytes)
+    except RateLimitError as e:
+        _defer_for_retry(job, RATE_LIMIT_BACKOFF_S, str(e), kind='rate-limit')
+        return
+    except TransientError as e:
+        _defer_for_retry(job, TRANSIENT_BACKOFF_S, str(e), kind='transient')
+        return
+    except PermanentError as e:
         _mark_failed(job_id, user_id, str(e)[:500])
+        return
+    except Exception as e:
+        # Unknown exception class - treat as transient (worth retrying)
+        # but log so we can promote to a known classification later.
+        _defer_for_retry(job, TRANSIENT_BACKOFF_S, str(e), kind='unknown')
         return
 
     conn.execute(
@@ -261,6 +268,43 @@ def _process_job(job: dict) -> None:
     db.commit()
     email_bus.publish({'type': 'email-job', 'id': job_id, 'user_id': user_id,
                         'status': 'sent', 'sent_at': db._now()})
+
+
+def _defer_for_retry(job: dict, schedule: list, error: str,
+                       kind: str) -> None:
+    """Bump attempts, set next_retry_at = now + schedule[attempts-1].
+    For RateLimit: keep deferring forever (the cap clears daily). For
+    transient: give up after MAX_TRANSIENT_ATTEMPTS and mark failed."""
+    job_id = job['id']
+    user_id = job['user_id']
+    conn = db.get_db()
+    new_attempts = (job.get('attempts') or 0) + 1
+
+    is_transient = (kind in ('transient', 'unknown'))
+    if is_transient and new_attempts >= MAX_TRANSIENT_ATTEMPTS:
+        # Stamp the final attempts count too - otherwise DB shows
+        # MAX-1 and the operator can't tell from the row alone how
+        # many tries we burned.
+        conn.execute(
+            "UPDATE email_jobs SET attempts=? WHERE id=?",
+            (new_attempts, job_id))
+        db.commit()
+        _mark_failed(job_id, user_id,
+                      f'after {new_attempts} attempts: {error[:400]}')
+        return
+
+    backoff = schedule[min(new_attempts - 1, len(schedule) - 1)]
+    conn.execute(
+        "UPDATE email_jobs SET status='queued', attempts=?, "
+        "next_retry_at=datetime('now', ? || ' seconds'), error=? "
+        "WHERE id=?",
+        (new_attempts, f'+{backoff}', error[:500], job_id))
+    db.commit()
+    email_bus.publish({
+        'type': 'email-job', 'id': job_id, 'user_id': user_id,
+        'status': 'retrying', 'attempts': new_attempts,
+        'retry_in_s': backoff, 'kind': kind, 'error': error[:200],
+    })
 
 
 def _mark_failed(job_id: int, user_id: int, error: str) -> None:
@@ -316,9 +360,14 @@ def _worker_loop() -> None:
 
 
 def _pop_next_queued_job() -> dict | None:
+    """Pop the oldest queued job whose retry timer has elapsed (or
+    that has never been retried). Survives container restart because
+    state lives in SQLite."""
     conn = db.get_db()
     row = conn.execute(
-        "SELECT id, user_id, token_id, to_email "
-        "FROM email_jobs WHERE status='queued' ORDER BY id LIMIT 1"
+        "SELECT id, user_id, token_id, to_email, attempts, next_retry_at "
+        "FROM email_jobs WHERE status='queued' "
+        "AND (next_retry_at IS NULL OR next_retry_at <= datetime('now')) "
+        "ORDER BY id LIMIT 1"
     ).fetchone()
     return dict(row) if row else None
