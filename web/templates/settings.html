@@ -665,13 +665,7 @@ function showLiveView(doorId, doorName) {
     // responses after a few seconds. Polling at ~5 fps gives a usable
     // live feel and survives the proxy chain.
     openModal(`
-        <h2>Live view: ${doorName}</h2>
-        <p style="font-size:0.85em;color:#aaa;margin-bottom:0.6rem;">
-            Detection boxes are drawn live from the running detector.
-            Green = decoded token; orange = detected but not decoded.
-            This view shares the camera with the scan loop &mdash; no
-            extra load.
-        </p>
+        <h2>Live view: ${doorName} <button class="help" type="button" data-help="Detection boxes are drawn live from the running detector. Green = decoded token; orange = detected but not decoded. This view shares the camera with the scan loop - no extra load.">?</button></h2>
         <img id="live-img" alt="live camera"
              style="width:100%;max-width:720px;display:block;border:1px solid #333;border-radius:4px;background:#000;">
         <div style="text-align:right;margin-top:0.8rem;">
