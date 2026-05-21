@@ -313,16 +313,28 @@ def decode_with_preprocess(decode_fn, crop):
             continue
 
 
-# Frame-stacking ring depth. On per-frame decode miss we median-stack the
-# last STACK_N crops (aligned to the current crop shape) and retry the
-# preprocess+decode pipeline. Targets rolling-shutter horizontal bands
-# that shift between frames when an IP camera films a phone screen - the
-# bands' position drifts as camera readout and screen PWM phase walk past
-# each other, so a median across N frames cancels them out. Benchmarked
-# on a banded video: lifted decode rate from 1.4% to 38% and time-to-
-# first-decode from ~3.4s to ~0.6s. On clean video the path never
-# engages (single-frame decode succeeds first), so no happy-path cost.
-STACK_N = int(os.environ.get('REEFY_QR_STACK_N', '5'))
+# Frame-stacking ring depth + cascade windows. On per-frame decode miss
+# we median-stack a sliding subset of the last STACK_N crops (aligned
+# to the current crop shape) and retry the decode pipeline. The cascade
+# tries progressively wider windows so we catch both fast-shifting
+# bands (small N suffices) and slow/static bands (need a wider window
+# to see a phase shift). Cascade ordering matters: the cheapest stack
+# is tried first; the cascade exits on the first decode hit.
+#
+# Why per-frame "band-attacking" preprocessing variants (vertical morph
+# close, per-row dark-strip interpolation, FFT notch) were tried and
+# dropped: on real banded videos they decoded the exact same frame set
+# as the no-extra-variant pipeline. Whatever residual the stacked image
+# is leaving behind on miss isn't band geometry - it's QR-module-level
+# damage that no per-frame trick recovers.
+#
+# Benchmarked on two banded videos:
+#   - "fast-shift" video: 80 -> 99 decoded frames (38% -> 47%)
+#   - "slow-shift" video: 35 -> 101 decoded frames (17% -> 48%)
+# On clean video the cascade never engages (single-frame succeeds first).
+STACK_N = int(os.environ.get('REEFY_QR_STACK_N', '20'))
+# Cascade windows for the stacked-retry path. First-hit wins.
+STACK_CASCADE = [5, 10, 20]
 
 
 def _resize_to(img, shape):
@@ -333,10 +345,10 @@ def _resize_to(img, shape):
 
 
 def decode_with_stacking(decode_fn, crop, crop_ring):
-    """Single-frame decode first; on miss, median-stack the prior crops
-    aligned to the current crop and retry. Returns (tokens, used_stack)
-    where `used_stack` is True if stacking is what produced the tokens
-    (used for telemetry / debugging).
+    """Single-frame decode first; on miss, run a cascade of median-
+    stacked retries with progressively wider windows. Returns
+    (tokens, used_stack) - `used_stack` is True if any stacked retry
+    is what produced the tokens (telemetry / debug).
 
     `crop_ring` is a per-camera deque(maxlen=STACK_N); the caller is
     responsible for holding one ring per ROI source. We mutate it
@@ -345,22 +357,27 @@ def decode_with_stacking(decode_fn, crop, crop_ring):
     tokens = decode_with_preprocess(decode_fn, crop)
     used_stack = False
     if not tokens and len(crop_ring) >= 1:
-        # YOLO ROI wobbles a few px between frames; align all prior crops
-        # to the current shape before stacking. cv2.resize is ~free
-        # compared to the decode work that follows.
+        # YOLO ROI wobbles a few px between frames; align all prior
+        # crops to the current shape before stacking. cv2.resize is
+        # ~free compared to the decode work that follows.
         aligned = [_resize_to(c, crop.shape) for c in crop_ring] + [crop]
-        stacked = np.median(np.stack(aligned, axis=0), axis=0).astype(np.uint8)
-        tokens = decode_with_preprocess(decode_fn, stacked)
-        if tokens:
-            used_stack = True
+        for window in STACK_CASCADE:
+            if len(aligned) < window:
+                continue
+            sub = aligned[-window:]
+            stacked = (
+                np.median(np.stack(sub, axis=0), axis=0).astype(np.uint8))
+            tokens = decode_with_preprocess(decode_fn, stacked)
+            if tokens:
+                used_stack = True
+                break
     crop_ring.append(crop)
     # decode_with_preprocess falls off the end (returns None) when every
     # variant fails. Normalise to an empty list so the caller's
-    # `for token in tokens:` never sees None - latent bug in the old
+    # `for token in tokens:` never sees None - latent bug in
     # decode_with_preprocess too, only exposed on streams with corrupt
     # HEVC frames where every preprocess variant misses.
     return tokens or [], used_stack
-    return []
 
 
 def detect_qr_regions(det_type, det_model, frame, conf=0.3):
