@@ -12,7 +12,13 @@ permissions:
 
 jobs:
   build-push:
-    runs-on: [self-hosted]
+    # Temporarily on GitHub-hosted: self-hosted runner (big-bird-not-large)
+    # has been intermittently corrupting TLS streams to ghcr.io
+    # ("tls: bad record MAC") during buildcache pulls, failing every
+    # build of v2026.05.20-01. Swap back to [self-hosted] once big-bird's
+    # outbound TLS is stable. Same network class also caused firmware
+    # download failures earlier today.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
