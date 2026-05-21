@@ -354,7 +354,12 @@ def decode_with_stacking(decode_fn, crop, crop_ring):
         if tokens:
             used_stack = True
     crop_ring.append(crop)
-    return tokens, used_stack
+    # decode_with_preprocess falls off the end (returns None) when every
+    # variant fails. Normalise to an empty list so the caller's
+    # `for token in tokens:` never sees None - latent bug in the old
+    # decode_with_preprocess too, only exposed on streams with corrupt
+    # HEVC frames where every preprocess variant misses.
+    return tokens or [], used_stack
     return []
 
 
