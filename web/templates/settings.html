@@ -655,12 +655,15 @@ function syslogScrollBottom() {
     if (c) { c.scrollTop = c.scrollHeight; _syslogAutoScroll = true; }
 }
 
+let _liveTimer = null;
+
 function showLiveView(doorId, doorName) {
     // Live preview tap of the detector's CameraReader: shared frame +
-    // detection overlay, NO extra RTSP connection. Adding a cache-bust
-    // query param so the browser doesn't reuse a stalled previous MJPEG
-    // session if the user closes and re-opens the modal quickly.
-    const cb = Date.now();
+    // detection overlay, NO extra RTSP connection. Polled snapshots
+    // (not MJPEG multipart) because the cloudflared tunnel +
+    // reefy-proxy in front of the device closes long-lived streaming
+    // responses after a few seconds. Polling at ~5 fps gives a usable
+    // live feel and survives the proxy chain.
     openModal(`
         <h2>Live view: ${doorName}</h2>
         <p style="font-size:0.85em;color:#aaa;margin-bottom:0.6rem;">
@@ -669,18 +672,36 @@ function showLiveView(doorId, doorName) {
             This view shares the camera with the scan loop &mdash; no
             extra load.
         </p>
-        <img id="live-img" src="/api/doors/${doorId}/live?t=${cb}"
+        <img id="live-img" alt="live camera"
              style="width:100%;max-width:720px;display:block;border:1px solid #333;border-radius:4px;background:#000;">
         <div style="text-align:right;margin-top:0.8rem;">
             <button class="btn-sm" onclick="closeLiveView()">Close</button>
         </div>
     `);
+
+    const img = document.getElementById('live-img');
+    const url = `/api/doors/${doorId}/snapshot.jpg`;
+    let inflight = false;
+    img.onload = () => { inflight = false; };
+    img.onerror = () => { inflight = false; };
+
+    function tick() {
+        // Skip if the previous request hasn't returned yet; otherwise
+        // a slow snapshot would stack up requests and starve the
+        // scan loop's CPU.
+        if (inflight) { return; }
+        inflight = true;
+        img.src = `${url}?t=${Date.now()}`;
+    }
+    tick();  // first paint immediately
+    _liveTimer = setInterval(tick, 200);  // 5 fps
 }
 
 function closeLiveView() {
-    // Forcibly drop the MJPEG <img> src so the browser tears down the
-    // streaming HTTP connection. Without this, the request stays open
-    // (consuming a server thread) until the user navigates away.
+    if (_liveTimer) {
+        clearInterval(_liveTimer);
+        _liveTimer = null;
+    }
     const img = document.getElementById('live-img');
     if (img) { img.src = ''; }
     closeModal();
