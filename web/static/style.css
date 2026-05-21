@@ -137,8 +137,18 @@ table {
 th, td { padding: 0.6rem 0.8rem; text-align: left; border-bottom: 1px solid #eee; }
 th { background: #fafafa; font-weight: 600; font-size: 0.85rem; color: #666; }
 td { font-size: 0.9rem; }
-.actions { white-space: nowrap; }
-.actions button { margin-right: 0.3rem; }
+/* Stack action buttons vertically in the table to keep the Actions
+   column narrow - 3 horizontal buttons ("QR Codes" / "Send Email" /
+   "Delete") pushed the table past its 1100px max-width and clipped
+   the rightmost button. Mobile (<=700px) overrides this back to the
+   row-card layout further down. */
+.actions { white-space: normal; vertical-align: top; }
+.actions button {
+    display: block;
+    width: 100%;
+    margin: 0 0 0.25rem 0;
+}
+.actions button:last-child { margin-bottom: 0; }
 .empty { color: #999; text-align: center; padding: 2rem; }
 
 /* Login */

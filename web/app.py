@@ -458,6 +458,80 @@ def api_test_shelly():
 
 # --- Camera status ---
 
+@app.route('/api/doors/<int:door_id>/live')
+@login_required
+def api_door_live(door_id):
+    """MJPEG live preview of the door's camera with detection overlay.
+
+    Taps the running detector's CameraReader (same process, no extra
+    RTSP connection - zero risk to the scan loop) and overlays YOLO
+    detections + decoded tokens on each served frame. Detections are
+    drawn only when fresh (<1s old) so old boxes don't linger.
+
+    Stream is multipart/x-mixed-replace (an <img src=...> tag renders
+    it as a live video without any JS). Rate-limited to ~5 fps to
+    keep CPU + bandwidth modest; the scan loop is unaffected.
+    """
+    door_row = db.get_door(door_id)
+    if not door_row:
+        return jsonify(error='Door not found'), 404
+
+    # Late import: qr_live pulls in cv2 + ultralytics at top, fine
+    # since the detector is running in this same process.
+    import qr_live
+    import cv2
+
+    live = qr_live.get_live_door(door_row['name'])
+    if live is None or live.camera is None:
+        return jsonify(error='Detector not running for this door'), 503
+
+    OVERLAY_TTL = 1.0   # seconds - drop boxes older than this
+    FPS_LIMIT = 5       # frames/sec served downstream
+    JPEG_QUALITY = 70
+
+    def gen():
+        last_emit = 0.0
+        while True:
+            now = time.time()
+            sleep = max(0, (1.0 / FPS_LIMIT) - (now - last_emit))
+            if sleep:
+                time.sleep(sleep)
+            frame, _count, _ts = live.camera.get_frame()
+            if frame is None:
+                continue
+            frame = frame.copy()
+            with live._live_lock:
+                dets = list(live.latest_detections)
+                dets_age = time.time() - live.latest_detections_ts
+            if dets_age <= OVERLAY_TTL:
+                for x1, y1, x2, y2, conf, token in dets:
+                    color = (0, 220, 0) if token else (0, 165, 255)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    label = (
+                        f'{token[:24]}{"..." if token and len(token) > 24 else ""}'
+                        if token else f'? {conf:.2f}'
+                    )
+                    cv2.putText(
+                        frame, label, (x1, max(0, y1 - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
+                        cv2.LINE_AA,
+                    )
+            ok, jpg = cv2.imencode(
+                '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+            if not ok:
+                continue
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n'
+                   + jpg.tobytes() + b'\r\n')
+            last_emit = time.time()
+
+    return Response(
+        stream_with_context(gen()),
+        mimetype='multipart/x-mixed-replace; boundary=frame',
+        headers={'Cache-Control': 'no-store, no-cache, must-revalidate'},
+    )
+
+
 @app.route('/api/camera-status', methods=['GET'])
 @login_required
 def api_camera_status():

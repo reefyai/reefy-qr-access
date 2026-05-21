@@ -1023,6 +1023,38 @@ class DoorConfig:
         # per-frame decode miss. One ring per door so concurrent doors
         # don't pollute each other's stacks.
         self.crop_ring = deque(maxlen=STACK_N)
+        # Latest detection state for the /api/doors/<name>/live MJPEG
+        # preview. List of (x1, y1, x2, y2, conf, token_or_None) tuples
+        # plus a wall-clock timestamp; the live endpoint draws these as
+        # an overlay on the most recent CameraReader frame. Updated
+        # under _live_lock from the main detect loop so a separate
+        # MJPEG-serving thread can read them without tearing.
+        self.latest_detections = []
+        self.latest_detections_ts = 0.0
+        self._live_lock = threading.Lock()
+
+
+# Module-level registry of running DoorConfigs keyed by door name. The
+# web layer reads this to find the right CameraReader + detection
+# state when serving the /api/doors/<name>/live MJPEG stream. Updated
+# by run_multi_door on startup; entries persist until the process
+# exits (a config reload kills the whole detector loop so the registry
+# rebuilds from scratch on restart).
+_LIVE_DOORS = {}
+_LIVE_DOORS_LOCK = threading.Lock()
+
+
+def get_live_door(name):
+    """Return the running DoorConfig for `name`, or None if not running.
+    Web layer uses this to expose a live preview of each door's camera."""
+    with _LIVE_DOORS_LOCK:
+        return _LIVE_DOORS.get(name)
+
+
+def list_live_doors():
+    """Return a list of (name, DoorConfig) for currently running doors."""
+    with _LIVE_DOORS_LOCK:
+        return list(_LIVE_DOORS.items())
 
 
 # --- Main loop ---
@@ -1049,6 +1081,16 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                                        url_builder=door_cfg.url_builder)
         door_cfg.camera.start()
         _camera_readers.append(door_cfg.camera)
+
+    # Publish this run's doors to the module-level registry so the web
+    # layer (Flask thread, same process) can serve live previews. Wipe
+    # any leftover entries from a prior run; the new dict matches the
+    # set of CameraReaders we just spawned. Lock guards readers in the
+    # MJPEG generator from seeing a partially-rebuilt map.
+    with _LIVE_DOORS_LOCK:
+        _LIVE_DOORS.clear()
+        for door_cfg in doors:
+            _LIVE_DOORS[door_cfg.name] = door_cfg
 
     # Wait for first frames
     time.sleep(2)
@@ -1084,6 +1126,13 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
             detections = detect_qr_regions(det_type, det_model, frame,
                                            conf=conf)
 
+            # Per-frame snapshot of detections + their first decoded
+            # token. Published to door_cfg.latest_detections so the
+            # /api/doors/<name>/live MJPEG endpoint can draw an overlay
+            # on the latest CameraReader frame. Updated under the lock
+            # so the live thread doesn't see torn writes.
+            live_dets = []
+
             for x1, y1, x2, y2, confidence in detections:
                 crop = frame[y1:y2, x1:x2]
                 if crop.size == 0:
@@ -1091,6 +1140,10 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
 
                 tokens, _ = decode_with_stacking(
                     decode_fn, crop, door_cfg.crop_ring)
+                live_dets.append(
+                    (int(x1), int(y1), int(x2), int(y2),
+                     float(confidence),
+                     tokens[0] if tokens else None))
 
                 for token in tokens:
                     # Cooldown: skip if same door+token seen recently
@@ -1164,6 +1217,16 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                                 event_bus.publish(entry)
                     except Exception as e:
                         print(f"[ERROR] Failed to log/publish event: {e}")
+
+            # Publish this frame's detections (could be empty) so the
+            # live MJPEG endpoint can render an up-to-date overlay.
+            # Always update the timestamp, even on empty: the live
+            # endpoint stale-outs detections older than ~1s, so an
+            # empty publish here clears the previous frame's boxes
+            # rather than leaving them stuck on screen.
+            with door_cfg._live_lock:
+                door_cfg.latest_detections = live_dets
+                door_cfg.latest_detections_ts = time.time()
 
         if not any_frame:
             time.sleep(0.01)  # avoid busy loop when no new frames

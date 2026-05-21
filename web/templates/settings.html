@@ -29,7 +29,7 @@
                 <button class="btn-sm btn-danger" onclick="deleteDoor({{ door.id }}, '{{ door.name }}')">Delete</button>
             </div>
             <div class="door-details">
-                <span>Camera: {{ door.camera_uuid or 'Not set' }} <span class="camera-status" id="cam-status-{{ door.name }}"></span></span>
+                <span>Camera: {{ door.camera_uuid or 'Not set' }} <span class="camera-status" id="cam-status-{{ door.name }}"></span> <button class="btn-sm" onclick="showLiveView({{ door.id }}, '{{ door.name }}')">Live View</button></span>
                 <span>Shelly: {{ door.shelly_device_id or 'Not set' }} <button class="btn-sm" onclick="testShelly({{ door.id }})">Test</button> <span id="shelly-status-{{ door.id }}" style="font-size:0.85em;"></span></span>
             </div>
         </div>
@@ -653,6 +653,37 @@ function syslogClear() {
 function syslogScrollBottom() {
     const c = document.getElementById('syslog-container');
     if (c) { c.scrollTop = c.scrollHeight; _syslogAutoScroll = true; }
+}
+
+function showLiveView(doorId, doorName) {
+    // Live preview tap of the detector's CameraReader: shared frame +
+    // detection overlay, NO extra RTSP connection. Adding a cache-bust
+    // query param so the browser doesn't reuse a stalled previous MJPEG
+    // session if the user closes and re-opens the modal quickly.
+    const cb = Date.now();
+    openModal(`
+        <h2>Live view: ${doorName}</h2>
+        <p style="font-size:0.85em;color:#aaa;margin-bottom:0.6rem;">
+            Detection boxes are drawn live from the running detector.
+            Green = decoded token; orange = detected but not decoded.
+            This view shares the camera with the scan loop &mdash; no
+            extra load.
+        </p>
+        <img id="live-img" src="/api/doors/${doorId}/live?t=${cb}"
+             style="width:100%;max-width:720px;display:block;border:1px solid #333;border-radius:4px;background:#000;">
+        <div style="text-align:right;margin-top:0.8rem;">
+            <button class="btn-sm" onclick="closeLiveView()">Close</button>
+        </div>
+    `);
+}
+
+function closeLiveView() {
+    // Forcibly drop the MJPEG <img> src so the browser tears down the
+    // streaming HTTP connection. Without this, the request stays open
+    // (consuming a server thread) until the user navigates away.
+    const img = document.getElementById('live-img');
+    if (img) { img.src = ''; }
+    closeModal();
 }
 
 function showAddDoor() {
