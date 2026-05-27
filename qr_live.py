@@ -790,6 +790,29 @@ def _resolve_camera_ip(camera_spec):
     return resolve_camera_address(camera_spec, cameras)
 
 
+def _inject_rtsp_credentials(url, username, password):
+    """Insert user:pass@ into an RTSP URL if missing.
+
+    Hikvision's GetStreamUri returns the bare `rtsp://host:port/path`
+    even when RTSP requires authentication; OpenCV/FFmpeg then fail to
+    open the stream. We hold the credentials anyway (same ones used
+    for the ONVIF SOAP call), so splice them into the URL before
+    handing it to the reader."""
+    if not username:
+        return url
+    from urllib.parse import urlparse, urlunparse, quote
+    parsed = urlparse(url)
+    if parsed.username:
+        return url  # already credentialed
+    userinfo = quote(username, safe='')
+    if password:
+        userinfo += ':' + quote(password, safe='')
+    host = parsed.hostname or ''
+    if parsed.port:
+        host += f':{parsed.port}'
+    return urlunparse(parsed._replace(netloc=f'{userinfo}@{host}'))
+
+
 def _fetch_onvif_session_url(camera_spec, username, password, profile='main'):
     """Fetch a fresh ONVIF session RTSP URL, re-discovering IP by UUID first."""
     ip = _resolve_camera_ip(camera_spec)
@@ -800,12 +823,20 @@ def _fetch_onvif_session_url(camera_spec, username, password, profile='main'):
     if not urls:
         return None
     profile_lower = profile.lower()
+    chosen = None
     for u in urls:
         if profile_lower in u['profile'].lower():
-            print(f"[INFO] Got ONVIF session URL for '{profile}' ({ip}): {u['url']}")
-            return u['url']
-    print(f"[INFO] Using first ONVIF session URL ({ip}): {urls[0]['url']}")
-    return urls[0]['url']
+            chosen = u
+            break
+    if chosen is None:
+        chosen = urls[0]
+        print(f"[INFO] No profile match for '{profile}', using first ({ip})")
+    final = _inject_rtsp_credentials(chosen['url'], username, password)
+    # Mask the password in the log; the URL still appears in detector
+    # logs that may be shared.
+    safe = _inject_rtsp_credentials(chosen['url'], username, '***' if password else '')
+    print(f"[INFO] Got ONVIF session URL for '{profile}' ({ip}): {safe}")
+    return final
 
 
 def build_rtsp_url(camera_spec, door_def, discovered_cameras=None):
