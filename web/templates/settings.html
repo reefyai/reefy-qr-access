@@ -656,6 +656,7 @@ function syslogScrollBottom() {
 }
 
 let _liveTimer = null;
+let _liveBlobCleanup = null;
 
 function showLiveView(doorId, doorName) {
     // Live preview tap of the detector's CameraReader: shared frame +
@@ -666,35 +667,69 @@ function showLiveView(doorId, doorName) {
     // live feel and survives the proxy chain.
     openModal(`
         <h2>Live view: ${doorName} <button class="help" type="button" data-help="Detection boxes are drawn live from the running detector. Green = decoded token; orange = detected but not decoded. This view shares the camera with the scan loop - no extra load.">?</button></h2>
-        <img id="live-img" alt="live camera"
-             style="width:100%;max-width:720px;display:block;border:1px solid #333;border-radius:4px;background:#000;">
+        <div id="live-wrap" style="position:relative;width:100%;max-width:720px;aspect-ratio:16/9;background:#000;border:1px solid #333;border-radius:4px;overflow:hidden;">
+            <img id="live-img" alt="live camera"
+                 style="width:100%;height:100%;object-fit:contain;display:block;">
+            <div id="live-status" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#aaa;font-size:0.9rem;text-align:center;padding:1rem;">
+                Connecting to camera...
+            </div>
+        </div>
         <div style="text-align:right;margin-top:0.8rem;">
             <button class="btn-sm" onclick="closeLiveView()">Close</button>
         </div>
     `);
 
     const img = document.getElementById('live-img');
+    const statusEl = document.getElementById('live-status');
     const url = `/api/doors/${doorId}/snapshot.jpg`;
     let inflight = false;
-    img.onload = () => { inflight = false; };
-    img.onerror = () => { inflight = false; };
+    let lastBlobUrl = null;
 
-    function tick() {
-        // Skip if the previous request hasn't returned yet; otherwise
-        // a slow snapshot would stack up requests and starve the
-        // scan loop's CPU.
+    async function tick() {
+        // Skip if the previous request hasn't returned yet; otherwise a
+        // slow snapshot would stack up requests and starve the scan loop.
         if (inflight) { return; }
         inflight = true;
-        img.src = `${url}?t=${Date.now()}`;
+        try {
+            const res = await fetch(`${url}?t=${Date.now()}`);
+            if (!res.ok) {
+                // 503 "No frame yet" / "Detector not running": leave the
+                // last good frame in place (if any) and show a small
+                // status overlay. Avoids the broken-image-icon flicker
+                // we used to get when assigning the failed URL to img.src.
+                let msg = 'Waiting for camera...';
+                try { const j = await res.json(); if (j && j.error) msg = j.error; }
+                catch(e) {}
+                statusEl.textContent = msg;
+                statusEl.style.display = 'flex';
+                return;
+            }
+            const blob = await res.blob();
+            const objUrl = URL.createObjectURL(blob);
+            img.src = objUrl;
+            if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
+            lastBlobUrl = objUrl;
+            statusEl.style.display = 'none';
+        } catch(e) {
+            statusEl.textContent = 'Connection error';
+            statusEl.style.display = 'flex';
+        } finally {
+            inflight = false;
+        }
     }
     tick();  // first paint immediately
     _liveTimer = setInterval(tick, 200);  // 5 fps
+    _liveBlobCleanup = () => { if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl); };
 }
 
 function closeLiveView() {
     if (_liveTimer) {
         clearInterval(_liveTimer);
         _liveTimer = null;
+    }
+    if (_liveBlobCleanup) {
+        _liveBlobCleanup();
+        _liveBlobCleanup = null;
     }
     const img = document.getElementById('live-img');
     if (img) { img.src = ''; }

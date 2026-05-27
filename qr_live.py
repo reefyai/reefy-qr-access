@@ -711,7 +711,13 @@ def fetch_onvif_rtsp_urls(ip, username='', password='', xaddr='', timeout=5):
                                  timeout=timeout)
             uri_match = re.search(r'<[^:]*:?Uri>([^<]*)</[^:]*:?Uri>', stream_resp.text)
             if uri_match:
-                rtsp_url = uri_match.group(1)
+                # XML entities must be decoded: cameras correctly emit
+                # `&amp;` between query params, but the raw regex capture
+                # passes the literal `&amp;` straight into the RTSP URL.
+                # Hikvision then sees `?transportmode=unicast&amp;profile=Profile_1`
+                # as a single malformed param and the stream fails to open.
+                import html
+                rtsp_url = html.unescape(uri_match.group(1))
                 name = profile_names[i] if i < len(profile_names) else token
                 res = profile_resolutions.get(token, '')
                 label = f"{name} ({res})" if res else name
