@@ -49,8 +49,11 @@
             <td data-label="Door">{{ e.door_name }}</td>
             <td data-label="Video">
                 {% if e.thumbnail_path and e.video_path %}
-                <a href="#" class="event-thumb" onclick="event.preventDefault(); playVideo('/api/video/{{ e.video_path }}', this)">
-                    <img src="/api/thumbnail/{{ e.thumbnail_path }}" alt="event">
+                <a href="#" class="event-thumb loading" onclick="event.preventDefault(); playVideo('/api/video/{{ e.video_path }}', this)">
+                    <span class="thumb-spinner"></span>
+                    <img src="/api/thumbnail/{{ e.thumbnail_path }}" alt="event"
+                         onload="this.parentElement.classList.remove('loading')"
+                         onerror="thumbRetry(this, '/api/thumbnail/{{ e.thumbnail_path }}')">
                     <span class="play-overlay">&#9654;</span>
                 </a>
                 {% elif e.video_path %}
@@ -80,6 +83,20 @@
 
 {% block scripts %}
 <script>
+// Retry a thumbnail <img> that 404'd because the detector logged the
+// event before video_logger finished writing the file (3s trailing
+// clip + encode). Up to ~7 tries / ~14s; after that we give up and
+// hide the broken-image icon, falling back to just the spinner.
+function thumbRetry(img, url) {
+    const attempts = (img._thumbAttempts || 0) + 1;
+    img._thumbAttempts = attempts;
+    if (attempts > 7) {
+        img.style.display = 'none';
+        return;
+    }
+    setTimeout(() => { img.src = `${url}?r=${attempts}`; }, 2000);
+}
+
 async function playVideo(url, btn) {
     const check = await fetch(url, {method: 'HEAD'});
     if (!check.ok) {
@@ -150,8 +167,16 @@ function _renderRow(e) {
     }
     let videoCell;
     if (e.thumbnail_path && e.video_path) {
-        videoCell = `<a href="#" class="event-thumb" onclick="event.preventDefault(); playVideo('/api/video/${e.video_path}', this)">
-            <img src="/api/thumbnail/${e.thumbnail_path}" alt="event" loading="lazy">
+        // Fresh events: detector logs the row before video_logger has
+        // finished writing the trailing-3s clip + thumbnail, so the
+        // file 404s for several seconds. Show a spinner overlay and
+        // retry on error; once <img> loads we drop the loading class.
+        const thumbUrl = `/api/thumbnail/${e.thumbnail_path}`;
+        videoCell = `<a href="#" class="event-thumb loading" onclick="event.preventDefault(); playVideo('/api/video/${e.video_path}', this)">
+            <span class="thumb-spinner"></span>
+            <img src="${thumbUrl}" alt="event" loading="lazy"
+                 onload="this.parentElement.classList.remove('loading')"
+                 onerror="thumbRetry(this, '${thumbUrl}')">
             <span class="play-overlay">&#9654;</span>
         </a>`;
     } else if (e.video_path) {

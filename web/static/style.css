@@ -473,6 +473,33 @@ td { font-size: 0.9rem; }
     object-fit: cover;
     display: block;
 }
+/* While the thumbnail file is still being written by video_logger,
+   the <img> 404s. Show a spinner over the black background and hide
+   the broken-image icon until onload/onerror-retry resolves. */
+.event-thumb.loading img {
+    visibility: hidden;
+}
+.event-thumb .thumb-spinner {
+    display: none;
+}
+.event-thumb.loading .thumb-spinner {
+    display: block;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 18px;
+    height: 18px;
+    margin: -9px 0 0 -9px;
+    border: 2px solid rgba(255, 255, 255, 0.2);
+    border-top-color: rgba(255, 255, 255, 0.75);
+    border-radius: 50%;
+    animation: thumb-spin 0.8s linear infinite;
+    z-index: 1;
+}
+.event-thumb.loading .play-overlay { display: none; }
+@keyframes thumb-spin {
+    to { transform: rotate(360deg); }
+}
 .event-thumb .play-overlay {
     position: absolute;
     inset: 0;
