@@ -207,10 +207,21 @@ def init_db():
     # back to a full-token lookup.
     tok_cols = [r[1] for r in db.execute("PRAGMA table_info(tokens)").fetchall()]
     if 'short_id' not in tok_cols:
-        db.execute("ALTER TABLE tokens ADD COLUMN short_id TEXT UNIQUE")
+        # SQLite forbids ALTER TABLE ADD COLUMN with a UNIQUE
+        # constraint on an existing table. Add the column nullable,
+        # backfill every row, then enforce uniqueness via an index.
+        # Fresh installs hit the CREATE TABLE path above which keeps
+        # the inline UNIQUE; this path is migration-only.
+        db.execute("ALTER TABLE tokens ADD COLUMN short_id TEXT")
         for row in db.execute("SELECT id FROM tokens WHERE short_id IS NULL").fetchall():
             db.execute("UPDATE tokens SET short_id=? WHERE id=?",
                        (_mint_unique_short_id(db), row['id']))
+    # Idempotent: enforces uniqueness on every boot, harmless for both
+    # the fresh-install path (already UNIQUE inline) and the
+    # post-migration state. Partial index so NULL rows don't clash.
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_short_id "
+        "ON tokens(short_id) WHERE short_id IS NOT NULL")
 
     # Migrate email_jobs: attempts + next_retry_at for the worker's
     # backoff/retry path. Rate-limited or transient failures stay
