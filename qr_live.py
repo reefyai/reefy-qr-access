@@ -476,6 +476,31 @@ def discover_onvif_cameras(timeout=3):
     return cameras
 
 
+def _parse_soap_fault(text):
+    """Extract (reason_text, subcode) from a SOAP 1.2 fault response.
+
+    Returns (None, None) if `text` isn't a parseable SOAP fault.
+    Looks for both <env:Reason><env:Text>...</env:Text></env:Reason>
+    (human-readable, what we want to surface) and
+    <env:Code><env:Subcode><env:Value>...</env:Value></env:Subcode>
+    (machine-readable, e.g. `ter:NotAuthorized`). Namespace-prefix
+    agnostic because cameras use varying ones (env: / soap: / s:).
+    """
+    import re
+    if 'Fault' not in text:
+        return None, None
+    reason_match = re.search(
+        r'<[a-z0-9]+:Reason\b[^>]*>\s*<[a-z0-9]+:Text\b[^>]*>([^<]+)</[a-z0-9]+:Text>',
+        text, re.IGNORECASE)
+    subcode_match = re.search(
+        r'<[a-z0-9]+:Subcode\b[^>]*>\s*<[a-z0-9]+:Value\b[^>]*>([^<]+)</[a-z0-9]+:Value>',
+        text, re.IGNORECASE)
+    return (
+        reason_match.group(1).strip() if reason_match else None,
+        subcode_match.group(1).strip() if subcode_match else None,
+    )
+
+
 def _onvif_ws_security_header(username, password):
     """Build WS-Security UsernameToken header for ONVIF authentication."""
     import hashlib
@@ -577,9 +602,13 @@ def fetch_onvif_rtsp_urls(ip, username='', password='', xaddr='', timeout=5):
         '<soap:Body><trt:GetProfiles/></soap:Body></soap:Envelope>'
     )
 
-    # Try each URL until one works
+    # Try each URL until one works. STOP on auth failures - each
+    # retry counts against the camera's brute-force lockout (Hik
+    # locks after ~5 wrong attempts; iterating 5 paths trips it on
+    # ONE wrong-password user click). 2026-05-27 incident.
     resp = None
     used_url = None
+    auth_failed = False
     for media_url in media_urls:
         try:
             print(f"[INFO] Trying ONVIF GetProfiles at {media_url}")
@@ -590,14 +619,35 @@ def fetch_onvif_rtsp_urls(ip, username='', password='', xaddr='', timeout=5):
             if resp.status_code == 200 and 'token="' in resp.text and 'Profiles' in resp.text:
                 used_url = media_url
                 break
-            # Log response body for debugging
-            if resp.status_code != 200 or 'Fault' in resp.text:
-                print(f"[WARN] ONVIF response: {resp.text[:500]}")
+            # Log response body. Parse SOAP fault to surface the actual
+            # reason in plain English - cameras put the operator-
+            # friendly message in <env:Reason><env:Text>, which the
+            # raw XML dump used to hide behind a 500-char truncation.
+            reason, subcode = _parse_soap_fault(resp.text)
+            if reason:
+                print(f"[WARN] ONVIF fault: {reason}"
+                      + (f" (subcode={subcode})" if subcode else ""))
+            elif resp.status_code != 200 or 'Fault' in resp.text:
+                # Not a parseable SOAP fault (e.g. plain HTML 401 from
+                # Hik with no creds) - dump the raw body, full size.
+                print(f"[WARN] ONVIF response: {resp.text}")
+            # Auth failure -> bail. Trying the other paths just wastes
+            # lockout-counter strikes on the camera.
+            is_auth_fault = (resp.status_code in (401, 403)
+                             or (subcode and 'NotAuthorized' in subcode)
+                             or (subcode and 'authenticate' in subcode.lower())
+                             or (subcode and 'sender' in subcode.lower() and 'unauthorized' in (reason or '').lower()))
+            if is_auth_fault:
+                print(f"[WARN] auth failure - stopping retry to avoid "
+                      f"tripping camera's brute-force lockout")
+                auth_failed = True
+                break
         except Exception as e:
             print(f"[WARN] ONVIF GetProfiles failed at {media_url}: {e}")
 
     if not resp or not used_url:
-        print(f"[WARN] All ONVIF endpoints failed for {ip}")
+        if not auth_failed:
+            print(f"[WARN] All ONVIF endpoints failed for {ip}")
         return []
 
     # Extract profile token + name pairs: <Profiles ... token="X"><Name>Y</Name>
