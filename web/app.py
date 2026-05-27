@@ -858,6 +858,36 @@ def api_users_email_qr_batch():
     return jsonify(ok=True, queued=queued, skipped=skipped)
 
 
+@app.route('/api/users/mint-short-qr-batch', methods=['POST'])
+@login_required
+def api_users_mint_short_qr_batch():
+    """Issue a fresh token (with the new short_id alias) for each user
+    in the request. Existing active tokens stay active so anyone holding
+    a previously-distributed QR keeps scanning fine; this just adds a
+    new smaller QR that the operator can email out and later revoke
+    the old ones from. Operator-driven and not idempotent: clicking
+    twice mints two extra tokens."""
+    from .services.users import issue_initial_token
+    data = request.get_json() or {}
+    ids = data.get('user_ids') or []
+    if not isinstance(ids, list) or not ids:
+        return jsonify(error='user_ids must be a non-empty list'), 400
+    minted, skipped = 0, 0
+    for uid in ids:
+        try:
+            uid_int = int(uid)
+        except (ValueError, TypeError):
+            skipped += 1
+            continue
+        try:
+            issue_initial_token(uid_int, comment='short-alias bulk mint')
+            minted += 1
+        except Exception:
+            skipped += 1
+    _try_export_config()
+    return jsonify(ok=True, minted=minted, skipped=skipped)
+
+
 @app.route('/api/email-jobs/stream')
 @login_required
 def api_email_jobs_stream():

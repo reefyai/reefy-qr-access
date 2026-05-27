@@ -24,6 +24,7 @@ Internal
     <span id="bulk-count">0 selected</span>
     <select id="bulk-action" style="background:#1a1a1a;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:0.3rem 0.5rem;">
         <option value="email">Send Email</option>
+        <option value="mint-short">Issue new (smaller) QR</option>
     </select>
     <button class="btn-sm" onclick="bulkApply()">Apply</button>
     <button class="btn-sm" onclick="bulkClear()">Clear</button>
@@ -350,6 +351,25 @@ function bulkApply() {
                     showError(d.error || 'Batch email failed');
                     return;
                 }
+                bulkClear();
+            });
+    } else if (action === 'mint-short') {
+        confirmAction(
+            `Issue a new smaller QR token to <strong>${ids.length}</strong> resident${ids.length === 1 ? '' : 's'}? ` +
+            `Their existing QRs stay active - the new ones get added on top so you can email them out and revoke the old ones later.`,
+            async () => {
+                const res = await fetch('/api/users/mint-short-qr-batch', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({user_ids: ids}),
+                });
+                const d = await res.json();
+                if (!res.ok) {
+                    showError(d.error || 'Mint failed');
+                    return;
+                }
+                showError(`Minted ${d.minted} new QR token${d.minted === 1 ? '' : 's'}` +
+                          (d.skipped ? ` (${d.skipped} skipped)` : ''));
                 bulkClear();
             });
     }
