@@ -1136,6 +1136,15 @@ class DoorConfig:
         self.latest_detections = []
         self.latest_detections_ts = 0.0
         self._live_lock = threading.Lock()
+        # Start-of-burst markers for decode-latency measurement (the
+        # user-perceived "how long did I stand at the door" number).
+        # `detect_start_capture_ts` = camera capture timestamp of the
+        # first frame in the current detect burst where YOLO returned
+        # at least one QR region; cleared when a token decodes (and the
+        # delta is logged as access_log.decode_ms) or after 5s of no
+        # detections (next visitor starts a fresh measurement).
+        self.detect_start_capture_ts = None
+        self.last_detect_wallclock = 0.0
 
 
 # Module-level registry of running DoorConfigs keyed by door name. The
@@ -1230,6 +1239,23 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
             detections = detect_qr_regions(det_type, det_model, frame,
                                            conf=conf)
 
+            # Track the start of this detect burst so we can report
+            # decode latency on the eventual log_access. capture_ts is
+            # the frame's wall-clock capture timestamp, so the delta
+            # measured at decode-success time is true end-to-end "QR
+            # visible -> token decoded" duration (not just CPU time).
+            now_wallclock = time.time()
+            if detections:
+                if door_cfg.detect_start_capture_ts is None:
+                    door_cfg.detect_start_capture_ts = capture_ts or now_wallclock
+                door_cfg.last_detect_wallclock = now_wallclock
+            elif door_cfg.detect_start_capture_ts is not None:
+                # No detections in this frame; if it's been quiet long
+                # enough, the previous visitor walked away - reset so the
+                # next burst measures a fresh standing time.
+                if now_wallclock - door_cfg.last_detect_wallclock > 5.0:
+                    door_cfg.detect_start_capture_ts = None
+
             # Per-frame snapshot of detections + their first decoded
             # token. Published to door_cfg.latest_detections so the
             # /api/doors/<name>/live MJPEG endpoint can draw an overlay
@@ -1257,6 +1283,13 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                         continue
                     last_event[event_key] = now_t
 
+                    # Capture decode latency before we clear the burst
+                    # marker so the next visitor measures fresh.
+                    decode_ms = None
+                    if door_cfg.detect_start_capture_ts is not None:
+                        decode_ms = int((now_t - door_cfg.detect_start_capture_ts) * 1000)
+                    door_cfg.detect_start_capture_ts = None
+
                     door_cfg.token_count += 1
                     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
@@ -1267,12 +1300,13 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                     except Exception:
                         is_valid = token in door_cfg.valid_tokens
 
+                    decode_str = f" decode={decode_ms}ms" if decode_ms is not None else ""
                     if is_valid:
                         event = "ACCESS-GRANTED"
                         print(f"[{ts}] [{door_cfg.name}] ACCESS GRANTED: "
                               f"{token} (frame={frame_count}, "
                               f"conf={confidence:.2f}, "
-                              f"lag={frame_lag:.1f}s)")
+                              f"lag={frame_lag:.1f}s{decode_str})")
                         if door_cfg.door:
                             if door_cfg.door.open(token):
                                 door_cfg.door_opens += 1
@@ -1285,7 +1319,7 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                         print(f"[{ts}] [{door_cfg.name}] ACCESS DENIED: "
                               f"{token} (frame={frame_count}, "
                               f"conf={confidence:.2f}, "
-                              f"lag={frame_lag:.1f}s)")
+                              f"lag={frame_lag:.1f}s{decode_str})")
 
                     # Try to record video (may be skipped by cooldown).
                     # Predict both video + thumbnail relative paths; the
@@ -1311,7 +1345,8 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                         from web.db import log_access
                         log_id = log_access(door_cfg.name, token, event,
                                             video_path=video_rel,
-                                            thumbnail_path=thumb_rel)
+                                            thumbnail_path=thumb_rel,
+                                            decode_ms=decode_ms)
                         # Push to SSE clients via event bus
                         from web.events import event_bus
                         from web.db import get_access_logs_since

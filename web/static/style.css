@@ -515,6 +515,21 @@ td { font-size: 0.9rem; }
 .event-thumb:hover .play-overlay { background: rgba(0, 0, 0, 0.45); }
 
 .token-cell { font-family: monospace; font-size: 0.8rem; color: #888; }
+/* User-perceived "wait at the door" latency: capture timestamp of the
+   first YOLO-detected QR frame to wall-clock decoded-token instant.
+   Thresholds tuned to the typical Hik-sub-stream + YOLOv8-s loop:
+   <=1s is "felt instant", 1-3s is "noticeable pause", >3s is "user
+   probably re-aimed the QR" - check focus, lighting, or skip rate. */
+.decode-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font: 600 0.78rem -apple-system, system-ui, sans-serif;
+    color: #fff;
+}
+.decode-fast { background: #16a34a; }
+.decode-mid  { background: #d97706; }
+.decode-slow { background: #dc2626; }
 .unknown-user { color: #999; font-style: italic; }
 .modal-table { font-size: 0.85rem; }
 .modal-table th { font-size: 0.8rem; }

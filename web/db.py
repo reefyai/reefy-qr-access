@@ -115,7 +115,11 @@ CREATE TABLE IF NOT EXISTS access_log (
     event TEXT NOT NULL,
     timestamp TEXT NOT NULL DEFAULT (datetime('now')),
     video_path TEXT DEFAULT NULL,
-    thumbnail_path TEXT DEFAULT NULL
+    thumbnail_path TEXT DEFAULT NULL,
+    -- Milliseconds from the capture timestamp of the first YOLO-detected
+    -- QR frame in the burst to the wall-clock instant pyzbar decoded
+    -- the token. Surfaces user-perceived "wait at the door" latency.
+    decode_ms INTEGER DEFAULT NULL
 );
 """
 
@@ -186,6 +190,8 @@ def init_db():
     log_cols = [r[1] for r in db.execute("PRAGMA table_info(access_log)").fetchall()]
     if 'thumbnail_path' not in log_cols:
         db.execute("ALTER TABLE access_log ADD COLUMN thumbnail_path TEXT DEFAULT NULL")
+    if 'decode_ms' not in log_cols:
+        db.execute("ALTER TABLE access_log ADD COLUMN decode_ms INTEGER DEFAULT NULL")
 
     # Migrate email_jobs: attempts + next_retry_at for the worker's
     # backoff/retry path. Rate-limited or transient failures stay
@@ -454,12 +460,13 @@ def delete_door(door_id):
 
 # --- Access log helpers ---
 
-def log_access(door_name, token, event, video_path=None, thumbnail_path=None):
+def log_access(door_name, token, event, video_path=None, thumbnail_path=None,
+               decode_ms=None):
     def op(db):
         db.execute(
-            "INSERT INTO access_log (door_name, token, event, video_path, thumbnail_path) "
-            "VALUES (?,?,?,?,?)",
-            (door_name, token, event, video_path, thumbnail_path))
+            "INSERT INTO access_log (door_name, token, event, video_path, "
+            "thumbnail_path, decode_ms) VALUES (?,?,?,?,?,?)",
+            (door_name, token, event, video_path, thumbnail_path, decode_ms))
         return db.execute("SELECT last_insert_rowid()").fetchone()[0]
     return _write(op)
 
@@ -477,6 +484,7 @@ def get_access_logs(limit=200, offset=0):
             access_log.timestamp,
             access_log.video_path,
             access_log.thumbnail_path,
+            access_log.decode_ms,
             users.full_name,
             tokens.active as token_active
         FROM access_log
@@ -505,6 +513,7 @@ def get_access_logs_since(last_id):
             access_log.timestamp,
             access_log.video_path,
             access_log.thumbnail_path,
+            access_log.decode_ms,
             users.full_name,
             tokens.active as token_active
         FROM access_log
