@@ -28,6 +28,12 @@ CREATE TABLE IF NOT EXISTS tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     token TEXT NOT NULL UNIQUE,
+    -- 7-char Crockford-style base32 alias encoded in the user's QR.
+    -- Camera scans the alias (much smaller QR, ~21x21 modules at ECL H
+    -- = ~1.5x bigger modules per cm of printed QR) and the detector
+    -- looks the full token up by short_id. Nullable so legacy rows
+    -- (and pre-migration installs) still work via the full-token path.
+    short_id TEXT UNIQUE,
     comment TEXT NOT NULL DEFAULT '',
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -193,6 +199,19 @@ def init_db():
     if 'decode_ms' not in log_cols:
         db.execute("ALTER TABLE access_log ADD COLUMN decode_ms INTEGER DEFAULT NULL")
 
+    # Migrate tokens table: short_id for QR payload (6-char Crockford
+    # base32 alias). Backfill assigns one to every existing row so the
+    # new shorter QRs can be regenerated for any user that wants them;
+    # legacy printed QRs encoding the full 32-char token keep working
+    # because the detector tries the short_id lookup first, then falls
+    # back to a full-token lookup.
+    tok_cols = [r[1] for r in db.execute("PRAGMA table_info(tokens)").fetchall()]
+    if 'short_id' not in tok_cols:
+        db.execute("ALTER TABLE tokens ADD COLUMN short_id TEXT UNIQUE")
+        for row in db.execute("SELECT id FROM tokens WHERE short_id IS NULL").fetchall():
+            db.execute("UPDATE tokens SET short_id=? WHERE id=?",
+                       (_mint_unique_short_id(db), row['id']))
+
     # Migrate email_jobs: attempts + next_retry_at for the worker's
     # backoff/retry path. Rate-limited or transient failures stay
     # status='queued' but with a future next_retry_at.
@@ -339,13 +358,58 @@ def delete_user(user_id):
 
 # --- Token helpers ---
 
+# Crockford base32 set: digits + uppercase ASCII minus I/L/O/U so the
+# alias stays unambiguous if a human ever has to read or transcribe one.
+# All chars are in QR's alphanumeric mode, so 6 chars encodes to 33 bits
+# and fits comfortably in QR Version 1 (21x21 modules) at ECL H -
+# ~1.6x bigger modules than the full 32-char hex token's QR at the
+# same printed size, which is the whole point of this column.
+_SHORT_ID_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
+_SHORT_ID_LEN = 6
+
+
+def _mint_unique_short_id(db):
+    """Generate a short_id that's not already in `tokens`. Caller must
+    hold the write lock (passes `db` from inside an `_write` op or
+    init_db). UNIQUE constraint also guards against races at insert
+    time; this just keeps the common case collision-free."""
+    import secrets
+    while True:
+        candidate = ''.join(
+            secrets.choice(_SHORT_ID_ALPHABET) for _ in range(_SHORT_ID_LEN))
+        if not db.execute(
+                "SELECT 1 FROM tokens WHERE short_id=?",
+                (candidate,)).fetchone():
+            return candidate
+
+
 def create_token_for_user(user_id, token, comment=''):
     def op(db):
+        short_id = _mint_unique_short_id(db)
         db.execute(
-            "INSERT INTO tokens (user_id, token, comment) VALUES (?,?,?)",
-            (user_id, token, comment))
+            "INSERT INTO tokens (user_id, token, short_id, comment) "
+            "VALUES (?,?,?,?)",
+            (user_id, token, short_id, comment))
         return db.execute("SELECT last_insert_rowid()").fetchone()[0]
     return _write(op)
+
+
+def get_token_by_payload(payload):
+    """Look up a token row by either short_id (new QRs) or full token
+    (legacy QRs / config-static lists). Returns the full row as a dict
+    or None. The detector calls this on every decoded payload."""
+    db = get_db()
+    row = db.execute(
+        "SELECT * FROM tokens WHERE short_id=? OR token=? LIMIT 1",
+        (payload, payload)).fetchone()
+    return dict(row) if row else None
+
+
+def get_token_short_id(token):
+    db = get_db()
+    row = db.execute(
+        "SELECT short_id FROM tokens WHERE token=?", (token,)).fetchone()
+    return row['short_id'] if row else None
 
 
 def get_user_tokens(user_id):
@@ -363,9 +427,20 @@ def revoke_token(token_id):
 
 
 def get_all_active_tokens():
+    """Return the set of valid scan payloads (both short_ids and full
+    tokens) for every active token. The detector's hot path uses this
+    as a single in-memory membership check before calling
+    get_token_by_payload for the row details, so a scanned QR matches
+    whether it encodes the legacy 32-char token or the new short_id."""
     db = get_db()
-    rows = db.execute("SELECT token FROM tokens WHERE active=1").fetchall()
-    return [r['token'] for r in rows]
+    rows = db.execute(
+        "SELECT token, short_id FROM tokens WHERE active=1").fetchall()
+    out = set()
+    for r in rows:
+        out.add(r['token'])
+        if r['short_id']:
+            out.add(r['short_id'])
+    return out
 
 
 # --- Camera helpers ---

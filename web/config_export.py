@@ -7,7 +7,9 @@ from . import db
 def export_config(output_path="config/doors.yaml"):
     """Export doors and active user tokens to YAML config."""
     doors = db.get_doors()
-    tokens = db.get_all_active_tokens()
+    # get_all_active_tokens returns a set (membership semantics for the
+    # detector hot path); sort for stable YAML output.
+    tokens = sorted(db.get_all_active_tokens())
 
     config = {'doors': []}
     for door in doors:

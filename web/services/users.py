@@ -12,5 +12,6 @@ def issue_initial_token(user_id: int,
     duplicate the token-creation/PNG dance in two places."""
     token = create_token()
     db.create_token_for_user(user_id, token, comment=comment)
-    generate_qr_png(token)
+    short_id = db.get_token_short_id(token)
+    generate_qr_png(token, payload=short_id)
     return token

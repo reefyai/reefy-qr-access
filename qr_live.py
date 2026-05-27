@@ -1293,10 +1293,20 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                     door_cfg.token_count += 1
                     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
-                    # Check token against DB (live) with fallback to config
+                    # Resolve the scanned payload (short_id alias or full
+                    # token, depending on whether the QR was minted before
+                    # or after the alias migration) to the canonical full
+                    # token so audit + per-user joins stay stable. Falls
+                    # back to the door's static yaml list when DB is
+                    # unreachable.
                     try:
-                        from web.db import get_all_active_tokens
-                        is_valid = token in get_all_active_tokens()
+                        from web.db import get_token_by_payload, get_all_active_tokens
+                        row = get_token_by_payload(token)
+                        if row:
+                            is_valid = bool(row.get('active', 1))
+                            token = row['token']  # rewrite to canonical
+                        else:
+                            is_valid = token in get_all_active_tokens()
                     except Exception:
                         is_valid = token in door_cfg.valid_tokens
 

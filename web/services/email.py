@@ -197,14 +197,15 @@ def _process_job(job: dict) -> None:
     # Render the QR PNG fresh from the token.
     from ..qr_utils import get_qr_path, generate_qr_png
     token_row = conn.execute(
-        "SELECT token FROM tokens WHERE id=?", (job['token_id'],)).fetchone()
+        "SELECT token, short_id FROM tokens WHERE id=?",
+        (job['token_id'],)).fetchone()
     if not token_row:
         _mark_failed(job_id, user_id, 'Token vanished')
         return
     token_str = token_row['token']
     png_path = get_qr_path(token_str)
     if not png_path.exists():
-        generate_qr_png(token_str)
+        generate_qr_png(token_str, payload=token_row['short_id'])
     qr_bytes = Path(png_path).read_bytes()
 
     # Build the per-user template context.

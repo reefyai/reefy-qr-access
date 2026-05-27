@@ -224,7 +224,7 @@ def api_add_token(user_id):
 
     token = create_token()
     db.create_token_for_user(user_id, token, comment=comment)
-    generate_qr_png(token)
+    generate_qr_png(token, payload=db.get_token_short_id(token))
 
     _try_export_config()
     return jsonify(token=token, comment=comment), 201
@@ -243,7 +243,7 @@ def api_revoke_token(token_id):
 def api_token_qr(token_id):
     """Serve QR code PNG for a specific token."""
     d = get_db()
-    row = d.execute("SELECT token FROM tokens WHERE id=?",
+    row = d.execute("SELECT token, short_id FROM tokens WHERE id=?",
                     (token_id,)).fetchone()
     d.close()
     if not row:
@@ -252,7 +252,7 @@ def api_token_qr(token_id):
     token_val = row['token']
     path = get_qr_path(token_val)
     if not path.exists():
-        generate_qr_png(token_val)
+        generate_qr_png(token_val, payload=row['short_id'])
 
     return send_file(str(path.resolve()), mimetype='image/png')
 
@@ -266,7 +266,7 @@ def api_token_qr_labeled(token_id):
 
     d = get_db()
     row = d.execute("""
-        SELECT tokens.token, tokens.created_at, users.full_name
+        SELECT tokens.token, tokens.short_id, tokens.created_at, users.full_name
         FROM tokens JOIN users ON tokens.user_id = users.id
         WHERE tokens.id = ?
     """, (token_id,)).fetchone()
@@ -277,7 +277,7 @@ def api_token_qr_labeled(token_id):
     # Get or generate QR image
     qr_path = get_qr_path(row['token'])
     if not qr_path.exists():
-        generate_qr_png(row['token'])
+        generate_qr_png(row['token'], payload=row['short_id'])
 
     name = request.args.get('name', row['full_name'])
     comment = request.args.get('comment', '')
