@@ -89,9 +89,21 @@ def signal_handler(sig, frame):
 
 # --- mDNS discovery ---
 
+# Module-level shared cache of {device_id: ip}, populated by background
+# rediscovery from DoorController workers. Promoting to module scope so
+# multiple doors share results from a single mDNS sweep, and so an HTTP
+# failure on one door can invalidate just its own entry without losing
+# the others.
+_shelly_cache: dict[str, str] = {}
+_shelly_cache_lock = threading.Lock()
+
+
 def discover_shelly(timeout=5):
     """Auto-discover Shelly devices on the local network via mDNS.
-    Returns dict: shelly_id -> ip  (e.g. 'shelly1minig3-aabbccddeeff' -> '10.0.0.5')
+    Returns dict: shelly_id -> ip  (e.g. 'shelly1minig3-aabbccddeeff' -> '10.0.0.5').
+    Side effect: merges results into the module-level _shelly_cache so
+    DoorController workers can read fresh data without re-running mDNS
+    themselves.
     """
     if not HAS_ZEROCONF:
         print("[WARN] zeroconf not installed, cannot auto-discover Shelly")
@@ -125,7 +137,17 @@ def discover_shelly(timeout=5):
     for device_id, ip in discovered.items():
         print(f"[INFO] Found: {device_id} -> {ip}")
 
+    # Merge into module-level cache so other doors (and subsequent
+    # resolves on this door) see the result.
+    with _shelly_cache_lock:
+        _shelly_cache.update(discovered)
+
     return discovered
+
+
+def _is_ipv4(s: str) -> bool:
+    parts = s.split('.')
+    return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
 
 
 def resolve_shelly_address(shelly_spec, discovered_devices):
@@ -168,11 +190,22 @@ def resolve_shelly_address(shelly_spec, discovered_devices):
 # --- Door controller ---
 
 class DoorController:
-    """Controls door strike via Shelly 1 Mini Gen3 relay."""
+    """Controls door strike via Shelly 1 Mini Gen3 relay.
 
-    def __init__(self, name, shelly_ip, open_seconds=5, password=None):
+    Takes a `device_spec` which can be either a literal IPv4 address or
+    a Shelly mDNS device-id (e.g. 'shelly1g4-98a31677f6b8'). For the
+    device-id form, a background worker keeps running mDNS until the
+    device is found, then idles. On HTTP failure (Shelly rebooted, IP
+    changed via DHCP, container network blip), the worker is re-armed
+    and the cached IP invalidated so the next scan resolves fresh.
+
+    No periodic polling. Discovery only fires when actually needed:
+    initial resolve, after a failed call, or on cache miss.
+    """
+
+    def __init__(self, name, device_spec, open_seconds=5, password=None):
         self.name = name
-        self.shelly_ip = shelly_ip
+        self.device_spec = device_spec
         self.open_seconds = open_seconds
         self._auth = HTTPDigestAuth("admin", password) if password else None
         self._last_open = 0
@@ -182,8 +215,53 @@ class DoorController:
         if self._auth:
             self._session.auth = self._auth
 
+        # Discovery worker plumbing. The event is "set" when the worker
+        # should (re)attempt to find this device's IP via mDNS, and
+        # "clear" while idle. Initial set kicks off first discovery.
+        self._rediscover_event = threading.Event()
+        self._stop = False
+        if _is_ipv4(device_spec):
+            # Literal IP - skip discovery, seed cache directly so
+            # _resolve_ip() returns immediately.
+            with _shelly_cache_lock:
+                _shelly_cache[device_spec] = device_spec
+        else:
+            self._rediscover_event.set()
+        threading.Thread(target=self._discovery_worker, daemon=True,
+                         name=f'shelly-discover-{name}').start()
+
+    def _resolve_ip(self):
+        """Look up current IP for our device. None until first discovery
+        succeeds or the cached IP is invalidated by a failed call."""
+        if _is_ipv4(self.device_spec):
+            return self.device_spec
+        with _shelly_cache_lock:
+            return _shelly_cache.get(self.device_spec)
+
+    def _discovery_worker(self):
+        """Cycle mDNS until our device_id appears in the cache, then
+        idle until the next failure re-arms the event. Single-burst per
+        invocation: 5s discovery, then 10s sleep before next attempt
+        (mDNS broadcasts are cheap but not free)."""
+        while not self._stop:
+            self._rediscover_event.wait()
+            self._rediscover_event.clear()
+            while not self._stop and not self._resolve_ip():
+                print(f"[INFO] [{self.name}] Looking up Shelly "
+                      f"'{self.device_spec}' via mDNS...")
+                discover_shelly(timeout=5)
+                if self._resolve_ip():
+                    print(f"[INFO] [{self.name}] Shelly resolved -> "
+                          f"{self._resolve_ip()}")
+                    break
+                print(f"[WARN] [{self.name}] mDNS miss for "
+                      f"'{self.device_spec}', retrying in 10s")
+                time.sleep(10)
+
     def _get(self, url):
-        return self._session.get(url, timeout=3)
+        # Tight timeout so an unreachable Shelly fails fast and we can
+        # invalidate + re-discover within a single scan attempt.
+        return self._session.get(url, timeout=2)
 
     def open(self, token):
         """Open door strike. Returns True if command was sent."""
@@ -191,10 +269,24 @@ class DoorController:
             now = time.time()
             if now - self._last_open < self._cooldown:
                 return False
+            ip = self._resolve_ip()
+            # If the worker is still on its first pass, give it ~3s to
+            # land before failing - the operator's first scan right
+            # after container start should usually succeed.
+            for _ in range(30):
+                if ip:
+                    break
+                time.sleep(0.1)
+                ip = self._resolve_ip()
+            if not ip:
+                ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                print(f"[{ts}] [{self.name}] DOOR ERROR: Shelly "
+                      f"'{self.device_spec}' not yet discovered, scan ignored")
+                return False
             self._last_open = now
 
         ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        url = (f"http://{self.shelly_ip}/rpc/Switch.Set"
+        url = (f"http://{ip}/rpc/Switch.Set"
                f"?id=0&on=true&toggle_after={self.open_seconds}")
         try:
             resp = self._get(url)
@@ -203,12 +295,24 @@ class DoorController:
                   f"{self.open_seconds}s "
                   f"(token={token[:8]}...) shelly={resp.text}")
             return True
+        except (requests.ConnectionError, requests.Timeout) as e:
+            # Cached IP is wrong (Shelly moved or rebooted). Invalidate
+            # and arm the worker so the NEXT scan resolves fresh.
+            print(f"[{ts}] [{self.name}] DOOR ERROR: {ip} unreachable "
+                  f"({type(e).__name__}), re-detecting Shelly")
+            with _shelly_cache_lock:
+                _shelly_cache.pop(self.device_spec, None)
+            self._rediscover_event.set()
+            return False
         except Exception as e:
             print(f"[{ts}] [{self.name}] DOOR ERROR: {e}")
             return False
 
     def status(self):
-        url = f"http://{self.shelly_ip}/rpc/Switch.GetStatus?id=0"
+        ip = self._resolve_ip()
+        if not ip:
+            return "error: not yet discovered"
+        url = f"http://{ip}/rpc/Switch.GetStatus?id=0"
         try:
             resp = self._get(url)
             resp.raise_for_status()
@@ -1577,15 +1681,24 @@ def main():
             print(f"[INFO] [{name}] DRY RUN mode")
         else:
             shelly_spec = door_def.get('shelly', 'auto')
-            shelly_ip = resolve_shelly_address(shelly_spec, discovered_shelly)
-            if shelly_ip:
-                door_ctrl = DoorController(name, shelly_ip, open_seconds,
+            if shelly_spec == 'auto':
+                # 'auto' = first device the startup discovery found.
+                # No retry semantics for this case (resolving 'auto' on
+                # the fly would change which device a door talks to,
+                # which would be surprising).
+                shelly_spec = resolve_shelly_address('auto', discovered_shelly)
+            if shelly_spec:
+                door_ctrl = DoorController(name, shelly_spec, open_seconds,
                                            password=shelly_pass)
-                status = door_ctrl.status()
-                print(f"[INFO] [{name}] Shelly {shelly_ip} "
-                      f"(auth={'yes' if shelly_pass else 'no'}): {status}")
+                # Discovery now happens lazily in a background worker
+                # inside DoorController. Just print intent here; the
+                # worker logs the actual resolved IP when it lands.
+                print(f"[INFO] [{name}] Shelly '{shelly_spec}' "
+                      f"(auth={'yes' if shelly_pass else 'no'}, "
+                      f"resolution: lazy via mDNS)")
             else:
-                print(f"[WARN] [{name}] No Shelly found, door control disabled")
+                print(f"[WARN] [{name}] No Shelly configured ('auto' "
+                      f"requested but none discovered)")
                 door_ctrl = None
 
         print(f"[INFO] [{name}] Camera: {camera_url}")
