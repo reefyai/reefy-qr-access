@@ -907,6 +907,9 @@ def resolve_mdns_in_url(url):
 
 VIDEO_LOG_BUFFER_SECONDS = 5  # seconds of video before event
 VIDEO_LOG_AFTER_SECONDS = 3   # seconds of video after event
+# Thumbnail picked from this far back in the pre-buffer. 2s lands on
+# the person reaching the door instead of the QR-fills-frame moment.
+THUMBNAIL_LOOKBACK_S = 2.0
 
 
 class CameraReader(threading.Thread):
@@ -1060,15 +1063,23 @@ class VideoLogger:
         writer.release()
         total = len(pre_frames) + len(post_frames)
 
-        # Save a JPG thumbnail of the moment-of-detection frame so the
-        # access log can render a clickable preview instead of just a
-        # bare "Play" button. The last pre_frame is roughly when the QR
-        # entered view; falls back to first post_frame, then nothing
-        # (older rows already render "Play" for null thumbnail_path).
+        # Save a JPG thumbnail from ~THUMBNAIL_LOOKBACK_S before the
+        # decode moment. The newest pre_frame is right when the QR fills
+        # the camera (basically a photo of a QR code, useless for "who
+        # was this?"); walking back a couple seconds lands on the
+        # person approaching the door, which is what the operator
+        # actually wants to see in the access log. Falls back through
+        # the buffer if it's partially filled (just-booted detector)
+        # and finally to first post_frame.
         try:
             thumb_frame = None
             if pre_frames:
-                thumb_frame = pre_frames[-1][0]
+                newest_ts = pre_frames[-1][1] or 0
+                thumb_frame = pre_frames[0][0]  # earliest available
+                for frame, ts in reversed(pre_frames):
+                    if ts and newest_ts - ts >= THUMBNAIL_LOOKBACK_S:
+                        thumb_frame = frame
+                        break
             elif post_frames:
                 thumb_frame = post_frames[0]
             if thumb_frame is not None:
