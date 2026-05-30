@@ -95,6 +95,11 @@ def run_web(port, password):
     from web.services import email as email_svc
     email_svc.start_worker()
 
+    # Start the door-health monitor. Idempotent. Does its own work
+    # (alarm emails) only when enabled in Settings -> Monitoring.
+    from web.services import monitor as monitor_svc
+    monitor_svc.start_worker()
+
     app.run(host='0.0.0.0', port=port, debug=False,
             use_reloader=False, threaded=True)
 

@@ -422,38 +422,20 @@ def api_delete_door(door_id):
 @login_required
 def api_test_shelly():
     """Test Shelly relay access by querying its status."""
+    from .services import shelly as shelly_svc
     data = request.get_json() or {}
     door_id = data.get('door_id')
     if not door_id:
         return jsonify(error='door_id required'), 400
 
     door = db.get_door(door_id)
-    if not door or not door['shelly_device_id']:
-        return jsonify(error='Door or Shelly not configured'), 400
+    if not door:
+        return jsonify(error='Door not found'), 404
 
-    # Resolve Shelly IP
-    shelly_id = door['shelly_device_id']
-    shelly_ip = None
-    shellys = db.get_shellys()
-    for s in shellys:
-        if s['device_id'] == shelly_id:
-            shelly_ip = s['ip']
-            break
-
-    if not shelly_ip:
-        return jsonify(error=f'Shelly {shelly_id} IP not found. Run Scan Network first.'), 400
-
-    import requests as req
-    from requests.auth import HTTPDigestAuth
-    try:
-        auth = HTTPDigestAuth("admin", door['shelly_pass']) if door['shelly_pass'] else None
-        resp = req.get(f'http://{shelly_ip}/rpc/Switch.GetStatus?id=0',
-                       auth=auth, timeout=5)
-        resp.raise_for_status()
-        status = resp.json()
-        return jsonify(ok=True, status=status, ip=shelly_ip)
-    except Exception as e:
-        return jsonify(error=str(e)), 500
+    result = shelly_svc.check_door(door)
+    if result['ok']:
+        return jsonify(ok=True, status=result['status'], ip=result['ip'])
+    return jsonify(error=result['error'], ip=result['ip']), 500
 
 
 # --- Camera status ---
@@ -912,6 +894,53 @@ def api_email_jobs_stream():
         mimetype='text/event-stream',
         headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
     )
+
+
+# --- Monitoring ---
+
+@app.route('/api/monitor', methods=['GET'])
+@login_required
+def api_monitor_get():
+    """Return current monitor config + latest per-door health snapshot.
+    Uses peek() (no state changes, no emails) so opening the Settings
+    tab can't race with the background worker on alarm decisions."""
+    from .services import monitor as monitor_svc
+    cfg = monitor_svc.get_config()
+    try:
+        summary = monitor_svc.peek()
+    except Exception as e:
+        summary = {'error': str(e)[:200], 'doors': [], 'enabled': cfg['enabled']}
+    return jsonify(config=cfg, summary=summary)
+
+
+@app.route('/api/monitor', methods=['POST'])
+@login_required
+def api_monitor_save():
+    from .services import monitor as monitor_svc
+    data = request.get_json() or {}
+    cfg = monitor_svc.save_config(data)
+    return jsonify(ok=True, config=cfg)
+
+
+@app.route('/api/monitor/test', methods=['POST'])
+@login_required
+def api_monitor_test():
+    """Send a clearly-marked test alarm to every configured admin email,
+    bypassing the enabled flag and per-door state so the admin can
+    verify the email path without faking an outage."""
+    from .services import monitor as monitor_svc
+    from .services import email as email_svc
+    cfg = monitor_svc.get_config()
+    admins = cfg.get('admin_emails') or []
+    if not admins:
+        return jsonify(error='No admin emails configured'), 400
+    if not email_svc.is_configured():
+        return jsonify(error='Email provider not configured (Settings -> Email)'), 400
+    subject, html, text = monitor_svc.build_test_email()
+    sent, errors = email_svc.send_alert(admins, subject, html, text)
+    if errors and sent == 0:
+        return jsonify(error='; '.join(errors)[:500]), 500
+    return jsonify(ok=True, sent=sent, errors=errors)
 
 
 # --- Config export ---

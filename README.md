@@ -66,6 +66,15 @@ Then open `http://<host>:8080`, log in, and:
 3. **Users → Add User** creates a resident; the system generates a unique
    QR token. Print/share the QR; show it to the camera; the door unlocks.
 
+## Monitoring and alarm emails
+
+QR Access can email building admins when a door's camera goes offline
+or its Shelly relay stops responding, and again when the door
+recovers. Configure admin emails in **Settings → Monitoring**. See
+[docs/monitoring-alarms.md](docs/monitoring-alarms.md) for the full
+behaviour (what's checked, how often, what the emails look like, and
+how state survives restarts).
+
 ## Buildium integration (optional)
 
 If your building uses [Buildium](https://www.buildium.com/) for resident

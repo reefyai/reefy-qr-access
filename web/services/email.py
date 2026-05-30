@@ -142,6 +142,49 @@ def send_test(cfg: dict, to_email: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Alarm send (monitor.py)
+# ---------------------------------------------------------------------------
+
+# Provider send_one() requires qr_png_bytes for the cid:qrcode <img>
+# embedded in the QR-mail template. Alarm emails don't carry a QR, but
+# rather than reshape the provider interface, we pass a 1x1 transparent
+# PNG that no alarm template references - never rendered, never seen.
+_BLANK_PNG_B64 = ('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk'
+                  'YAAAAAYAAjCB0C8AAAAASUVORK5CYII=')
+
+
+def send_alert(to_emails: list[str], subject: str,
+                html: str, text: str) -> tuple[int, list[str]]:
+    """Send the same alarm/recovery message to each admin in `to_emails`.
+
+    Synchronous, serial - the monitor's tick rate (60s) is generous
+    enough that even 10 admins x ~1s SMTP latency fits inside one tick.
+    Each recipient gets its own personal copy (no group CC).
+
+    Returns (sent_count, error_messages).
+    """
+    import base64
+    if not is_configured():
+        return 0, ['email integration not configured']
+    cfg = get_config() or {}
+    provider = _provider_for(cfg)
+    blank_png = base64.b64decode(_BLANK_PNG_B64)
+
+    sent = 0
+    errors: list[str] = []
+    for addr in to_emails:
+        addr = (addr or '').strip()
+        if not addr:
+            continue
+        try:
+            provider.send_one(addr, subject, html, text, blank_png)
+            sent += 1
+        except Exception as e:
+            errors.append(f'{addr}: {type(e).__name__}: {e}'[:300])
+    return sent, errors
+
+
+# ---------------------------------------------------------------------------
 # Job queue
 # ---------------------------------------------------------------------------
 

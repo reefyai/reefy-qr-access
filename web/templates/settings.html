@@ -9,6 +9,7 @@
     <button class="settings-tab" data-tab="doors" onclick="showSettingsTab('doors')">Doors</button>
     <button class="settings-tab" data-tab="integrations" onclick="showSettingsTab('integrations')">Integrations</button>
     <button class="settings-tab" data-tab="email" onclick="showSettingsTab('email')">Email</button>
+    <button class="settings-tab" data-tab="monitoring" onclick="showSettingsTab('monitoring')">Monitoring</button>
     <button class="settings-tab" data-tab="system" onclick="showSettingsTab('system')">System</button>
 </div>
 
@@ -294,6 +295,50 @@ Leave a field blank to use the built-in default template.">?</button>
 </section>
 
 <!-- ========================================================== -->
+<!-- MONITORING TAB                                             -->
+<!-- ========================================================== -->
+<section class="settings-pane" data-pane="monitoring">
+    <div class="panel">
+        <h3>Door health monitoring
+            <button class="help" type="button" data-help="Every 60 seconds, QR Access checks each door's camera (must have received a fresh frame within the last 60s) and Shelly relay (single RPC probe). If either fails, the admin emails below get an alert. When the door recovers, they get a follow-up. State survives container restarts. See docs/monitoring-alarms.md for details.">?</button>
+        </h3>
+
+        <div id="monitor-status" style="margin-bottom:0.8rem;font-size:0.9em;color:#aaa;">
+            Loading status...
+        </div>
+
+        <form id="monitor-form" onsubmit="event.preventDefault(); monitorSave()">
+            <label style="display:flex;align-items:center;gap:0.5rem;">
+                <input type="checkbox" id="monitor-enabled">
+                Enable monitoring
+            </label>
+
+            <label style="margin-top:1rem;">Admin emails</label>
+            <div id="monitor-emails-list" style="display:flex;flex-direction:column;gap:0.4rem;margin-bottom:0.4rem;"></div>
+            <div style="display:flex;gap:0.4rem;">
+                <input type="email" id="monitor-new-email"
+                       placeholder="admin@example.com" style="flex:1;">
+                <button type="button" onclick="monitorAddEmail()">+ Add</button>
+            </div>
+            <div style="margin-top:0.4rem;color:#888;font-size:0.85em;">
+                Each address receives its own copy of every alarm and recovery email.
+            </div>
+
+            <div style="display:flex;gap:0.5rem;margin-top:1rem;">
+                <button type="submit">Save</button>
+                <button type="button" onclick="monitorTest()" id="monitor-test-btn">Send test alarm</button>
+            </div>
+            <div id="monitor-msg" style="margin-top:0.6rem;font-size:0.9em;"></div>
+        </form>
+    </div>
+
+    <div class="panel" style="margin-top:1rem;">
+        <h3>Current door health</h3>
+        <div id="monitor-doors" style="font-size:0.9em;">Loading...</div>
+    </div>
+</section>
+
+<!-- ========================================================== -->
 <!-- SYSTEM TAB (live system logs)                              -->
 <!-- ========================================================== -->
 <section class="settings-pane" data-pane="system">
@@ -333,9 +378,10 @@ function showSettingsTab(name) {
     // Lazy-init: only open the syslog SSE on first System tab view, so
     // we don't keep an EventSource open for users who never look at it.
     if (name === 'system') syslogInit();
+    if (name === 'monitoring') monitorInit();
 }
 (function initSettingsTab() {
-    const valid = ['doors', 'integrations', 'email', 'system'];
+    const valid = ['doors', 'integrations', 'email', 'monitoring', 'system'];
     let tab = location.hash.replace('#', '');
     if (!valid.includes(tab)) tab = 'doors';
     showSettingsTab(tab);
@@ -608,6 +654,196 @@ async function emailTest() {
 }
 
 emailLoadStatus();
+
+// --- Monitoring ---
+
+let _monitorAdminEmails = [];
+let _monitorInited = false;
+let _monitorRefreshTimer = null;
+
+function monitorMsg(text, kind) {
+    const el = document.getElementById('monitor-msg');
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.color = kind === 'error' ? '#ef4444' :
+                      kind === 'success' ? '#22c55e' : '#888';
+}
+
+function monitorRenderEmails() {
+    const list = document.getElementById('monitor-emails-list');
+    if (!list) return;
+    list.innerHTML = '';
+    if (!_monitorAdminEmails.length) {
+        list.innerHTML = '<div style="color:#888;font-size:0.85em;">No admin emails configured yet.</div>';
+        return;
+    }
+    _monitorAdminEmails.forEach((addr, idx) => {
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.gap = '0.4rem';
+        row.style.alignItems = 'center';
+        const input = document.createElement('input');
+        input.type = 'email';
+        input.value = addr;
+        input.style.flex = '1';
+        input.addEventListener('input', () => {
+            _monitorAdminEmails[idx] = input.value.trim();
+        });
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn-sm btn-danger';
+        btn.textContent = 'Remove';
+        btn.addEventListener('click', () => {
+            _monitorAdminEmails.splice(idx, 1);
+            monitorRenderEmails();
+        });
+        row.appendChild(input);
+        row.appendChild(btn);
+        list.appendChild(row);
+    });
+}
+
+function monitorAddEmail() {
+    const inp = document.getElementById('monitor-new-email');
+    const v = (inp.value || '').trim();
+    if (!v) return;
+    if (_monitorAdminEmails.includes(v)) {
+        monitorMsg(`${v} is already in the list`, 'error');
+        return;
+    }
+    _monitorAdminEmails.push(v);
+    inp.value = '';
+    monitorMsg('');
+    monitorRenderEmails();
+}
+
+function _badge(ok, label) {
+    const color = ok ? '#22c55e' : '#ef4444';
+    return `<span style="color:${color};font-weight:600;">${label}</span>`;
+}
+
+function monitorRenderSummary(summary) {
+    const el = document.getElementById('monitor-doors');
+    if (!el) return;
+    if (summary && summary.error) {
+        el.innerHTML = `<div style="color:#ef4444;">${summary.error}</div>`;
+        return;
+    }
+    const doors = (summary && summary.doors) || [];
+    if (!doors.length) {
+        el.innerHTML = '<div style="color:#888;">No doors configured.</div>';
+        return;
+    }
+    let html = '<table style="width:100%;border-collapse:collapse;">';
+    html += '<thead><tr style="text-align:left;color:#888;font-size:0.85em;border-bottom:1px solid #222;">';
+    html += '<th style="padding:0.4rem 0.6rem;">Door</th>';
+    html += '<th style="padding:0.4rem 0.6rem;">Camera</th>';
+    html += '<th style="padding:0.4rem 0.6rem;">Relay</th>';
+    html += '</tr></thead><tbody>';
+    for (const d of doors) {
+        const cam = d.camera || {};
+        const sh = d.shelly || {};
+        const camOk = cam.ok || cam.unknown;
+        const camLabel = cam.unknown ? 'PENDING' : (cam.ok ? 'OK' : 'STALE');
+        const camDetail = cam.detail || '';
+        const shLabel = !sh.configured ? 'n/a' : (sh.ok ? 'OK' : 'FAIL');
+        const shDetail = sh.detail || '';
+        html += '<tr style="border-bottom:1px solid #1a1a1a;">';
+        html += `<td style="padding:0.4rem 0.6rem;">${d.name}</td>`;
+        html += `<td style="padding:0.4rem 0.6rem;">${_badge(camOk, camLabel)} <span style="color:#888;font-size:0.85em;">${camDetail}</span></td>`;
+        if (!sh.configured) {
+            html += `<td style="padding:0.4rem 0.6rem;color:#888;">n/a</td>`;
+        } else {
+            html += `<td style="padding:0.4rem 0.6rem;">${_badge(sh.ok, shLabel)} <span style="color:#888;font-size:0.85em;">${shDetail}</span></td>`;
+        }
+        html += '</tr>';
+    }
+    html += '</tbody></table>';
+    if (summary.in_grace) {
+        html += '<div style="margin-top:0.6rem;color:#888;font-size:0.85em;">Boot grace period active - alarms suppressed until detector warms up.</div>';
+    }
+    el.innerHTML = html;
+}
+
+function monitorRenderStatus(cfg) {
+    const el = document.getElementById('monitor-status');
+    if (!el) return;
+    if (!cfg.enabled) {
+        el.innerHTML = '<div style="color:#aaa;">Monitoring is <strong>off</strong>. Add admin emails, then enable.</div>';
+        return;
+    }
+    if (!cfg.admin_emails.length) {
+        el.innerHTML = '<div style="color:#f59e0b;">Monitoring is on, but no admin emails are configured - alarms have nowhere to go.</div>';
+        return;
+    }
+    el.innerHTML = `<div style="padding:0.6rem 0.8rem;background:#0f1f0f;border:1px solid #2d6a2d;border-radius:6px;color:#86efac;"><strong>✓ Monitoring on</strong> &nbsp; <span style="color:#9bd6a0;font-size:0.85em;">${cfg.admin_emails.length} admin email${cfg.admin_emails.length === 1 ? '' : 's'}</span></div>`;
+}
+
+async function monitorLoad() {
+    try {
+        const res = await fetch('/api/monitor');
+        const d = await res.json();
+        const cfg = d.config || {enabled: false, admin_emails: []};
+        document.getElementById('monitor-enabled').checked = !!cfg.enabled;
+        _monitorAdminEmails = (cfg.admin_emails || []).slice();
+        monitorRenderEmails();
+        monitorRenderStatus(cfg);
+        monitorRenderSummary(d.summary || {});
+    } catch (e) {
+        monitorMsg('Failed to load monitor status: ' + e, 'error');
+    }
+}
+
+async function monitorSave() {
+    const payload = {
+        enabled: document.getElementById('monitor-enabled').checked,
+        admin_emails: _monitorAdminEmails.filter(e => e && e.trim()),
+    };
+    monitorMsg('Saving...');
+    const res = await fetch('/api/monitor', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+    });
+    const d = await res.json();
+    if (!res.ok) { monitorMsg(d.error || 'Save failed', 'error'); return; }
+    monitorMsg('Saved.', 'success');
+    _monitorAdminEmails = (d.config.admin_emails || []).slice();
+    monitorRenderEmails();
+    monitorRenderStatus(d.config);
+}
+
+async function monitorTest() {
+    const btn = document.getElementById('monitor-test-btn');
+    btn.disabled = true;
+    monitorMsg('Sending test alarm...');
+    try {
+        const res = await fetch('/api/monitor/test', {method: 'POST'});
+        const d = await res.json();
+        if (!res.ok) { monitorMsg(d.error || 'Test failed', 'error'); return; }
+        const errs = (d.errors || []).length;
+        const tail = errs ? ` (${errs} error${errs === 1 ? '' : 's'})` : '';
+        monitorMsg(`Sent to ${d.sent} admin${d.sent === 1 ? '' : 's'}${tail}.`,
+                    errs ? 'error' : 'success');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+function monitorInit() {
+    if (_monitorInited) {
+        monitorLoad();
+        return;
+    }
+    _monitorInited = true;
+    monitorLoad();
+    // Refresh the per-door health table every 30s while the tab is open.
+    _monitorRefreshTimer = setInterval(() => {
+        if (document.querySelector('.settings-pane.active')?.dataset.pane === 'monitoring') {
+            monitorLoad();
+        }
+    }, 30000);
+}
 
 // --- System logs (inline in System tab; lazy SSE) ---
 let _syslogInit = false;
