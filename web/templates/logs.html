@@ -290,7 +290,15 @@ function logsGoToFirstPage() {
         _refreshPager();
     };
     evtSource.onerror = function() {
-        badge.textContent = 'DISCONNECTED';
+        // CONNECTING: browser is auto-retrying after a drop - normal,
+        // transient (Cloudflare's HTTP/2 wall-clock cap hits long SSE
+        // streams). Tell the user we're reconnecting, not dead.
+        // CLOSED: browser gave up. Only then is "DISCONNECTED" honest.
+        if (evtSource.readyState === EventSource.CONNECTING) {
+            badge.textContent = 'RECONNECTING...';
+        } else {
+            badge.textContent = 'DISCONNECTED';
+        }
         badge.classList.add('badge-disconnected');
     };
     evtSource.onopen = function() {

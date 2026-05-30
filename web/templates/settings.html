@@ -889,7 +889,14 @@ function syslogInit() {
         if (_syslogAutoScroll) container.scrollTop = container.scrollHeight;
     };
     evt.onerror = function() {
-        badge.textContent = 'DISCONNECTED';
+        // CONNECTING = browser auto-retrying after a drop (Cloudflare's
+        // HTTP/2 wall-clock cap kills long-lived SSE streams). CLOSED =
+        // browser gave up. See logs.html for the full context.
+        if (evt.readyState === EventSource.CONNECTING) {
+            badge.textContent = 'RECONNECTING...';
+        } else {
+            badge.textContent = 'DISCONNECTED';
+        }
         badge.classList.add('badge-disconnected');
     };
     evt.onopen = function() {

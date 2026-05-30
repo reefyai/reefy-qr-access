@@ -53,10 +53,16 @@ evtSource.onmessage = function(event) {
 };
 
 evtSource.onerror = function() {
-    badge.textContent = 'DISCONNECTED';
+    // See logs.html for context: Cloudflare's HTTP/2 wall-clock cap
+    // drops long-lived SSE streams. CONNECTING = browser auto-retrying
+    // (transient); CLOSED = browser gave up.
+    if (evtSource.readyState === EventSource.CONNECTING) {
+        badge.textContent = 'RECONNECTING...';
+    } else {
+        badge.textContent = 'DISCONNECTED';
+    }
     badge.classList.add('badge-disconnected');
 };
-
 evtSource.onopen = function() {
     badge.textContent = 'LIVE';
     badge.classList.remove('badge-disconnected');
