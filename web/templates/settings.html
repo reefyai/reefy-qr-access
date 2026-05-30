@@ -657,9 +657,12 @@ emailLoadStatus();
 
 // --- Monitoring ---
 
-let _monitorAdminEmails = [];
-let _monitorInited = false;
-let _monitorRefreshTimer = null;
+// var, not let: showSettingsTab() runs at script init (IIFE below) and
+// may call monitorInit() before this declaration line is reached, which
+// would put `let`-declared bindings in the temporal dead zone.
+var _monitorAdminEmails = [];
+var _monitorInited = false;
+var _monitorRefreshTimer = null;
 
 function monitorMsg(text, kind) {
     const el = document.getElementById('monitor-msg');
@@ -846,8 +849,10 @@ function monitorInit() {
 }
 
 // --- System logs (inline in System tab; lazy SSE) ---
-let _syslogInit = false;
-let _syslogAutoScroll = true;
+// var, not let: same TDZ reason as _monitor* above - showSettingsTab() may
+// invoke syslogInit() at page init when the URL hash is #system.
+var _syslogInit = false;
+var _syslogAutoScroll = true;
 
 function syslogInit() {
     if (_syslogInit) return;
