@@ -317,7 +317,8 @@ Leave a field blank to use the built-in default template.">?</button>
             <div id="monitor-emails-list" style="display:flex;flex-direction:column;gap:0.4rem;margin-bottom:0.4rem;"></div>
             <div style="display:flex;gap:0.4rem;">
                 <input type="email" id="monitor-new-email"
-                       placeholder="admin@example.com" style="flex:1;">
+                       placeholder="admin@example.com" style="flex:1;"
+                       onkeydown="if (event.key==='Enter') { event.preventDefault(); monitorAddEmail(); }">
                 <button type="button" onclick="monitorAddEmail()">+ Add</button>
             </div>
             <div style="margin-top:0.4rem;color:#888;font-size:0.85em;">
@@ -798,6 +799,15 @@ async function monitorLoad() {
 }
 
 async function monitorSave() {
+    // Flush any pending text in the new-email input. Without this, a
+    // user who types an address and clicks Save without first clicking
+    // "+ Add" silently loses it - the saved list comes out empty.
+    const pending = (document.getElementById('monitor-new-email').value || '').trim();
+    if (pending && !_monitorAdminEmails.includes(pending)) {
+        _monitorAdminEmails.push(pending);
+        document.getElementById('monitor-new-email').value = '';
+        monitorRenderEmails();
+    }
     const payload = {
         enabled: document.getElementById('monitor-enabled').checked,
         admin_emails: _monitorAdminEmails.filter(e => e && e.trim()),
