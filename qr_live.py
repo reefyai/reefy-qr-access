@@ -484,6 +484,51 @@ def decode_with_stacking(decode_fn, crop, crop_ring):
     return tokens or [], used_stack
 
 
+# Gap (seconds) of no decode activity after which a new frame is treated
+# as a NEW visitor, so the stacking ring is reset before its decode. The
+# ring only advances on detection frames, so without this it stays frozen
+# with the previous visitor's crops indefinitely.
+VISITOR_GAP_S = float(os.environ.get('REEFY_QR_VISITOR_GAP_S', '5'))
+
+
+class StackingDecoder:
+    """Per-camera median-stacking QR decoder.
+
+    Owns the crop_ring used to recover hard-to-read QRs by median-stacking
+    recent frames, AND the policy for resetting it so one visitor's frames
+    never stack into another visitor's decode. The ring only advances on
+    detection frames, so without a reset it can stay frozen with a previous
+    visitor's QR between visitors; the next person's single-frame miss could
+    then median-stack those stale crops and decode the previous token.
+    Resetting between visitors / after a decode keeps each decode scoped to
+    the current presentation.
+    """
+
+    def __init__(self, decode_fn, *, gap_s=VISITOR_GAP_S, maxlen=STACK_N):
+        self._decode_fn = decode_fn
+        self._ring = deque(maxlen=maxlen)
+        self._gap_s = gap_s
+        self._last_ts = None
+
+    def decode(self, crop, now):
+        """Decode one ROI crop. `now` is a wallclock used to detect the
+        inter-visitor gap. Returns (tokens, used_stack)."""
+        # New visitor after a quiet gap: drop the previous visitor's stale
+        # crops so this decode can't median-stack their QR and return the
+        # previous token. The ring only advances on detection frames, so
+        # without this it stays frozen between visitors indefinitely.
+        if self._last_ts is not None and now - self._last_ts > self._gap_s:
+            self._ring.clear()
+        self._last_ts = now
+        tokens, used_stack = decode_with_stacking(
+            self._decode_fn, crop, self._ring)
+        # A successful decode consumes the presentation; reset so the next
+        # frame starts fresh (also closes the within-gap tailgating window).
+        if tokens:
+            self._ring.clear()
+        return tokens, used_stack
+
+
 def detect_qr_regions(det_type, det_model, frame, conf=0.3):
     if det_type == 'tensorrt':
         results = det_model(frame, conf=conf, verbose=False)
@@ -1237,11 +1282,12 @@ class DoorConfig:
         self.door_opens = 0
         self.denied_count = 0
         self._last_processed_frame = 0
-        # Per-door rolling buffer of recent QR crops, used by
-        # decode_with_stacking to median-out rolling-shutter bands on
-        # per-frame decode miss. One ring per door so concurrent doors
-        # don't pollute each other's stacks.
-        self.crop_ring = deque(maxlen=STACK_N)
+        # Per-door median-stacking decoder (recovers hard-to-read QRs from
+        # recent frames). One per door so concurrent doors don't pollute
+        # each other's stacks; it also resets between visitors so one
+        # person's frames can't stack into another's decode. Lazily built
+        # in run_multi_door once decode_fn is available.
+        self.stacker = None
         # Latest detection state for the /api/doors/<name>/live MJPEG
         # preview. List of (x1, y1, x2, y2, conf, token_or_None) tuples
         # plus a wall-clock timestamp; the live endpoint draws these as
@@ -1383,8 +1429,9 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                 if crop.size == 0:
                     continue
 
-                tokens, _ = decode_with_stacking(
-                    decode_fn, crop, door_cfg.crop_ring)
+                if door_cfg.stacker is None:
+                    door_cfg.stacker = StackingDecoder(decode_fn)
+                tokens, _ = door_cfg.stacker.decode(crop, now_wallclock)
                 live_dets.append(
                     (int(x1), int(y1), int(x2), int(y2),
                      float(confidence),
