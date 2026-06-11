@@ -1442,6 +1442,14 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                     now_t = time.time()
                     event_key = (door_cfg.name, token)
                     if now_t - last_event.get(event_key, 0) < EVENT_COOLDOWN:
+                        # A token re-decoding inside its cooldown means the
+                        # visitor was already served and simply hasn't
+                        # lowered the phone. Clear the burst marker so it
+                        # re-arms on the next frame; otherwise the whole
+                        # cooldown wait accumulates into the next event's
+                        # decode_ms and reads as a pathologically slow
+                        # decode (seen as 7-9s entries for a held-up phone).
+                        door_cfg.detect_start_capture_ts = None
                         continue
                     last_event[event_key] = now_t
 
@@ -1473,6 +1481,13 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                         is_valid = token in door_cfg.valid_tokens
 
                     decode_str = f" decode={decode_ms}ms" if decode_ms is not None else ""
+                    # Relay reaction: grant decision -> relay command
+                    # confirmed (HTTP response from the Shelly). Includes
+                    # any resolve-wait inside open(), so it reflects the
+                    # user-perceived gap between "scanner saw me" and
+                    # "strike buzzed". None when no command was sent
+                    # (dry-run, door cooldown, or relay unreachable).
+                    relay_ms = None
                     if is_valid:
                         event = "ACCESS-GRANTED"
                         print(f"[{ts}] [{door_cfg.name}] ACCESS GRANTED: "
@@ -1480,7 +1495,10 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                               f"conf={confidence:.2f}, "
                               f"lag={frame_lag:.1f}s{decode_str})")
                         if door_cfg.door:
+                            relay_t0 = time.monotonic()
                             if door_cfg.door.open(token):
+                                relay_ms = int(
+                                    (time.monotonic() - relay_t0) * 1000)
                                 door_cfg.door_opens += 1
                         else:
                             print(f"[{ts}] [{door_cfg.name}] DRY RUN: "
@@ -1518,7 +1536,8 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                         log_id = log_access(door_cfg.name, token, event,
                                             video_path=video_rel,
                                             thumbnail_path=thumb_rel,
-                                            decode_ms=decode_ms)
+                                            decode_ms=decode_ms,
+                                            relay_ms=relay_ms)
                         # Push to SSE clients via event bus
                         from web.events import event_bus
                         from web.db import get_access_logs_since

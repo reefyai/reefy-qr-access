@@ -23,6 +23,7 @@
             <th>User</th>
             <th>Token</th>
             <th>Decode</th>
+            <th>Relay</th>
             <th>Door</th>
             <th>Video</th>
         </tr>
@@ -54,6 +55,13 @@
                 <span class="no-video">—</span>
                 {% endif %}
             </td>
+            <td data-label="Relay">
+                {% if e.relay_ms is not none %}
+                <span class="decode-badge {{ 'decode-fast' if e.relay_ms <= 500 else ('decode-mid' if e.relay_ms <= 1500 else 'decode-slow') }}">{{ e.relay_ms }}ms</span>
+                {% else %}
+                <span class="no-video">—</span>
+                {% endif %}
+            </td>
             <td data-label="Door">{{ e.door_name }}</td>
             <td data-label="Video">
                 {% if e.thumbnail_path and e.video_path %}
@@ -73,7 +81,7 @@
         </tr>
         {% endfor %}
         {% if not entries %}
-        <tr id="empty-row"><td colspan="7" class="empty">No access events yet.</td></tr>
+        <tr id="empty-row"><td colspan="8" class="empty">No access events yet.</td></tr>
         {% endif %}
     </tbody>
 </table>
@@ -201,12 +209,21 @@ function _renderRow(e) {
     } else {
         decodeCell = '<span class="no-video">&mdash;</span>';
     }
+    let relayCell;
+    if (e.relay_ms != null) {
+        const cls = e.relay_ms <= 500 ? 'decode-fast'
+                  : e.relay_ms <= 1500 ? 'decode-mid' : 'decode-slow';
+        relayCell = `<span class="decode-badge ${cls}">${e.relay_ms}ms</span>`;
+    } else {
+        relayCell = '<span class="no-video">&mdash;</span>';
+    }
     tr.innerHTML = `
         <td data-label="Time">${e.timestamp} <span class="time-ago" data-ts="${e.timestamp}"></span></td>
         <td data-label="Event">${eventBadge}</td>
         <td data-label="User">${userCell}</td>
         <td data-label="Token" class="token-cell">${e.token.substring(0, 8)}...</td>
         <td data-label="Decode">${decodeCell}</td>
+        <td data-label="Relay">${relayCell}</td>
         <td data-label="Door">${e.door_name}</td>
         <td data-label="Video">${videoCell}</td>
     `;
@@ -238,7 +255,7 @@ async function logsLoadPage(offset) {
     if (d.entries.length === 0) {
         const empty = document.createElement('tr');
         empty.id = 'empty-row';
-        empty.innerHTML = '<td colspan="7" class="empty">No access events yet.</td>';
+        empty.innerHTML = '<td colspan="8" class="empty">No access events yet.</td>';
         tbody.appendChild(empty);
     } else {
         d.entries.forEach(e => tbody.appendChild(_renderRow(e)));

@@ -125,7 +125,11 @@ CREATE TABLE IF NOT EXISTS access_log (
     -- Milliseconds from the capture timestamp of the first YOLO-detected
     -- QR frame in the burst to the wall-clock instant pyzbar decoded
     -- the token. Surfaces user-perceived "wait at the door" latency.
-    decode_ms INTEGER DEFAULT NULL
+    decode_ms INTEGER DEFAULT NULL,
+    -- Milliseconds from the grant decision to the Shelly confirming the
+    -- relay command (HTTP response received). NULL when no command was
+    -- sent: denied events, dry-run, door cooldown, relay unreachable.
+    relay_ms INTEGER DEFAULT NULL
 );
 """
 
@@ -198,6 +202,8 @@ def init_db():
         db.execute("ALTER TABLE access_log ADD COLUMN thumbnail_path TEXT DEFAULT NULL")
     if 'decode_ms' not in log_cols:
         db.execute("ALTER TABLE access_log ADD COLUMN decode_ms INTEGER DEFAULT NULL")
+    if 'relay_ms' not in log_cols:
+        db.execute("ALTER TABLE access_log ADD COLUMN relay_ms INTEGER DEFAULT NULL")
 
     # Migrate tokens table: short_id for QR payload (6-char Crockford
     # base32 alias). Backfill assigns one to every existing row so the
@@ -547,12 +553,13 @@ def delete_door(door_id):
 # --- Access log helpers ---
 
 def log_access(door_name, token, event, video_path=None, thumbnail_path=None,
-               decode_ms=None):
+               decode_ms=None, relay_ms=None):
     def op(db):
         db.execute(
             "INSERT INTO access_log (door_name, token, event, video_path, "
-            "thumbnail_path, decode_ms) VALUES (?,?,?,?,?,?)",
-            (door_name, token, event, video_path, thumbnail_path, decode_ms))
+            "thumbnail_path, decode_ms, relay_ms) VALUES (?,?,?,?,?,?,?)",
+            (door_name, token, event, video_path, thumbnail_path, decode_ms,
+             relay_ms))
         return db.execute("SELECT last_insert_rowid()").fetchone()[0]
     return _write(op)
 
@@ -571,6 +578,7 @@ def get_access_logs(limit=200, offset=0):
             access_log.video_path,
             access_log.thumbnail_path,
             access_log.decode_ms,
+            access_log.relay_ms,
             users.full_name,
             tokens.active as token_active
         FROM access_log
@@ -600,6 +608,7 @@ def get_access_logs_since(last_id):
             access_log.video_path,
             access_log.thumbnail_path,
             access_log.decode_ms,
+            access_log.relay_ms,
             users.full_name,
             tokens.active as token_active
         FROM access_log

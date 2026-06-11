@@ -75,3 +75,56 @@ def test_legacy_email_unique_constraint_dropped_on_init(tmp_path, monkeypatch):
         "SELECT COUNT(*) AS n FROM users WHERE email IS NULL"
     ).fetchone()
     assert has_null['n'] == 1
+
+
+def test_relay_ms_column_added_on_init(tmp_path, monkeypatch):
+    """access_log gains relay_ms on existing installs, and log_access
+    round-trips it (NULL for rows logged without a relay command)."""
+    config_dir = tmp_path / 'config'
+    config_dir.mkdir()
+    conn = sqlite3.connect(config_dir / 'qr_access.db')
+    # Pre-relay_ms access_log, as shipped before this migration.
+    conn.executescript("""
+        CREATE TABLE access_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            door_name TEXT NOT NULL DEFAULT '',
+            token TEXT NOT NULL,
+            event TEXT NOT NULL,
+            timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+            video_path TEXT DEFAULT NULL,
+            thumbnail_path TEXT DEFAULT NULL,
+            decode_ms INTEGER DEFAULT NULL
+        );
+        INSERT INTO access_log (door_name, token, event, decode_ms)
+            VALUES ('Front', 'tok-legacy', 'ACCESS-GRANTED', 766);
+    """)
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv('QR_CONFIG_DIR', str(config_dir))
+    monkeypatch.setenv('QR_ADMIN_PASSWORD', '')
+    for name in [n for n in list(sys.modules) if n == 'web' or n.startswith('web.')]:
+        del sys.modules[name]
+
+    from web import db
+    db.init_db()
+
+    conn = db.get_db()
+    cols = [r['name'] for r in
+            conn.execute("PRAGMA table_info(access_log)").fetchall()]
+    assert 'relay_ms' in cols
+
+    # Legacy row survived with relay_ms NULL.
+    legacy = db.get_access_logs(limit=10)[0]
+    assert legacy['token'] == 'tok-legacy'
+    assert legacy['relay_ms'] is None
+
+    # New rows round-trip both metrics; relay_ms stays NULL when the
+    # relay command wasn't sent (denied / dry-run / unreachable).
+    db.log_access('Front', 'tok-new', 'ACCESS-GRANTED',
+                  decode_ms=210, relay_ms=140)
+    db.log_access('Front', 'tok-denied', 'ACCESS-DENIED', decode_ms=180)
+    rows = {r['token']: r for r in db.get_access_logs(limit=10)}
+    assert rows['tok-new']['relay_ms'] == 140
+    assert rows['tok-new']['decode_ms'] == 210
+    assert rows['tok-denied']['relay_ms'] is None

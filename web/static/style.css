@@ -519,7 +519,10 @@ td { font-size: 0.9rem; }
    first YOLO-detected QR frame to wall-clock decoded-token instant.
    Thresholds tuned to the typical Hik-sub-stream + YOLOv8-s loop:
    <=1s is "felt instant", 1-3s is "noticeable pause", >3s is "user
-   probably re-aimed the QR" - check focus, lighting, or skip rate. */
+   probably re-aimed the QR" - check focus, lighting, or skip rate.
+   The Relay column reuses these classes with its own thresholds
+   (<=500ms fast / <=1500ms mid / else slow): LAN HTTP to the Shelly
+   is normally 50-300ms, >1.5s means resolve-wait or a flaky WiFi leg. */
 .decode-badge {
     display: inline-block;
     padding: 1px 6px;
