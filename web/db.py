@@ -122,9 +122,10 @@ CREATE TABLE IF NOT EXISTS access_log (
     timestamp TEXT NOT NULL DEFAULT (datetime('now')),
     video_path TEXT DEFAULT NULL,
     thumbnail_path TEXT DEFAULT NULL,
-    -- Milliseconds from the capture timestamp of the first YOLO-detected
-    -- QR frame in the burst to the wall-clock instant pyzbar decoded
-    -- the token. Surfaces user-perceived "wait at the door" latency.
+    -- Milliseconds from the decoding REGION's first YOLO detection to
+    -- its first successful decode (per-region tracks, see qr_tracks.py).
+    -- Surfaces user-perceived "wait at the door" latency; immune to
+    -- persistent QR-shaped scene objects that never decode.
     decode_ms INTEGER DEFAULT NULL,
     -- Milliseconds from the grant decision to the Shelly confirming the
     -- relay command (HTTP response received). NULL when no command was

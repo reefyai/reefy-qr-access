@@ -50,7 +50,7 @@ ENV MODEL_CACHE=/models
 ENV PYTHONUNBUFFERED=1
 RUN mkdir -p /models
 
-COPY qr_live.py run.py ./
+COPY qr_live.py qr_tracks.py run.py ./
 COPY web/ web/
 COPY reefy/ reefy/
 

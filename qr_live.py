@@ -28,6 +28,8 @@ import yaml
 import requests
 from requests.auth import HTTPDigestAuth
 from pathlib import Path
+
+from qr_tracks import QrTracks
 from datetime import datetime
 
 try:
@@ -220,6 +222,12 @@ class DoorController:
         # "clear" while idle. Initial set kicks off first discovery.
         self._rediscover_event = threading.Event()
         self._stop = False
+        # A scan that arrives while the relay is unresolved/unreachable
+        # is queued (token, ts) instead of dropped; the discovery
+        # worker fires it once the Shelly resolves, within
+        # _PENDING_OPEN_TTL_S. Stops the "scan ignored" dead window
+        # where the visitor did everything right and got nothing.
+        self._pending_open = None
         if _is_ipv4(device_spec):
             # Literal IP - skip discovery, seed cache directly so
             # _resolve_ip() returns immediately.
@@ -237,6 +245,21 @@ class DoorController:
             return self.device_spec
         with _shelly_cache_lock:
             return _shelly_cache.get(self.device_spec)
+
+    _PENDING_OPEN_TTL_S = 15
+
+    def _queue_pending_open(self, token):
+        with self._lock:
+            self._pending_open = (token, time.time())
+
+    def _take_pending_open(self):
+        """Pop the queued open if still fresh, else None."""
+        with self._lock:
+            pending = self._pending_open
+            self._pending_open = None
+        if pending and time.time() - pending[1] <= self._PENDING_OPEN_TTL_S:
+            return pending[0]
+        return None
 
     def _discovery_worker(self):
         """Cycle mDNS until our device_id appears in the cache, then
@@ -257,6 +280,12 @@ class DoorController:
                 print(f"[WARN] [{self.name}] mDNS miss for "
                       f"'{self.device_spec}', retrying in 10s")
                 time.sleep(10)
+            # Fire a scan that arrived while the relay was unresolved.
+            token = self._take_pending_open()
+            if token and not self._stop:
+                print(f"[INFO] [{self.name}] firing queued open "
+                      f"(scan arrived during rediscovery)")
+                self.open(token)
 
     def _get(self, url):
         # Tight timeout so an unreachable Shelly fails fast and we can
@@ -281,32 +310,59 @@ class DoorController:
             if not ip:
                 ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 print(f"[{ts}] [{self.name}] DOOR ERROR: Shelly "
-                      f"'{self.device_spec}' not yet discovered, scan ignored")
+                      f"'{self.device_spec}' not yet discovered, "
+                      f"open queued for resolve")
+                self._queue_pending_open(token)
+                self._rediscover_event.set()
                 return False
             self._last_open = now
 
         ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         url = (f"http://{ip}/rpc/Switch.Set"
                f"?id=0&on=true&toggle_after={self.open_seconds}")
-        try:
-            resp = self._get(url)
-            resp.raise_for_status()
-            print(f"[{ts}] [{self.name}] DOOR OPEN for "
-                  f"{self.open_seconds}s "
-                  f"(token={token[:8]}...) shelly={resp.text}")
-            return True
-        except (requests.ConnectionError, requests.Timeout) as e:
-            # Cached IP is wrong (Shelly moved or rebooted). Invalidate
-            # and arm the worker so the NEXT scan resolves fresh.
-            print(f"[{ts}] [{self.name}] DOOR ERROR: {ip} unreachable "
-                  f"({type(e).__name__}), re-detecting Shelly")
-            with _shelly_cache_lock:
-                _shelly_cache.pop(self.device_spec, None)
-            self._rediscover_event.set()
-            return False
-        except Exception as e:
-            print(f"[{ts}] [{self.name}] DOOR ERROR: {e}")
-            return False
+        # Retry the cached IP briefly before declaring it stale: the
+        # observed failure mode is a WiFi blip where the Shelly comes
+        # back on the SAME address within seconds - a full mDNS
+        # rediscovery (5s scan + 10s miss-retry) left the door dead
+        # for ~20s for nothing.
+        last_exc = None
+        for delay in (0, 0.5, 1.0):
+            if delay:
+                time.sleep(delay)
+            try:
+                resp = self._get(url)
+                resp.raise_for_status()
+                print(f"[{ts}] [{self.name}] DOOR OPEN for "
+                      f"{self.open_seconds}s "
+                      f"(token={token[:8]}...) shelly={resp.text}")
+                return True
+            except (requests.ConnectionError, requests.Timeout) as e:
+                last_exc = e
+                continue
+            except Exception as e:
+                print(f"[{ts}] [{self.name}] DOOR ERROR: {e}")
+                self._reset_cooldown()
+                return False
+
+        # Still unreachable after retries: invalidate the cached IP,
+        # queue this open, and arm the worker - it fires the open as
+        # soon as the Shelly re-resolves (often the same IP).
+        print(f"[{ts}] [{self.name}] DOOR ERROR: {ip} unreachable "
+              f"({type(last_exc).__name__} x3), re-detecting Shelly; "
+              f"open queued")
+        with _shelly_cache_lock:
+            _shelly_cache.pop(self.device_spec, None)
+        self._reset_cooldown()
+        self._queue_pending_open(token)
+        self._rediscover_event.set()
+        return False
+
+    def _reset_cooldown(self):
+        """A failed open must not burn the door cooldown - otherwise
+        the queued/retried open (or the visitor's next scan) gets
+        rejected as 'too soon' for a door that never actually opened."""
+        with self._lock:
+            self._last_open = 0
 
     def status(self):
         ip = self._resolve_ip()
@@ -1297,15 +1353,15 @@ class DoorConfig:
         self.latest_detections = []
         self.latest_detections_ts = 0.0
         self._live_lock = threading.Lock()
-        # Start-of-burst markers for decode-latency measurement (the
+        # Per-region tracks for decode-latency measurement (the
         # user-perceived "how long did I stand at the door" number).
-        # `detect_start_capture_ts` = camera capture timestamp of the
-        # first frame in the current detect burst where YOLO returned
-        # at least one QR region; cleared when a token decodes (and the
-        # delta is logged as access_log.decode_ms) or after 5s of no
-        # detections (next visitor starts a fresh measurement).
-        self.detect_start_capture_ts = None
-        self.last_detect_wallclock = 0.0
+        # Each detected region carries its own first-seen / first-
+        # decoded timestamps; a grant reports the latency of the track
+        # that decoded. Replaces the old single burst marker, which a
+        # persistent QR-shaped object in the scene (laptop screen,
+        # poster) kept armed forever - inflating decode_ms to "time
+        # since previous grant" (observed: 9-40s for a 0.2s decode).
+        self.tracks = QrTracks()
 
 
 # Module-level registry of running DoorConfigs keyed by door name. The
@@ -1400,22 +1456,16 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
             detections = detect_qr_regions(det_type, det_model, frame,
                                            conf=conf)
 
-            # Track the start of this detect burst so we can report
-            # decode latency on the eventual log_access. capture_ts is
-            # the frame's wall-clock capture timestamp, so the delta
-            # measured at decode-success time is true end-to-end "QR
-            # visible -> token decoded" duration (not just CPU time).
+            # Assign each detection to a per-region track; decode
+            # latency is measured per track (first_seen ->
+            # first_decoded), so a persistent non-decoding region in
+            # the scene can't inflate another region's number.
+            # capture_ts is the frame's wall-clock capture timestamp,
+            # so the latency is true end-to-end "QR visible -> token
+            # decoded" duration (not just CPU time).
             now_wallclock = time.time()
-            if detections:
-                if door_cfg.detect_start_capture_ts is None:
-                    door_cfg.detect_start_capture_ts = capture_ts or now_wallclock
-                door_cfg.last_detect_wallclock = now_wallclock
-            elif door_cfg.detect_start_capture_ts is not None:
-                # No detections in this frame; if it's been quiet long
-                # enough, the previous visitor walked away - reset so the
-                # next burst measures a fresh standing time.
-                if now_wallclock - door_cfg.last_detect_wallclock > 5.0:
-                    door_cfg.detect_start_capture_ts = None
+            track_ids = door_cfg.tracks.update(
+                detections, capture_ts or now_wallclock)
 
             # Per-frame snapshot of detections + their first decoded
             # token. Published to door_cfg.latest_detections so the
@@ -1424,7 +1474,7 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
             # so the live thread doesn't see torn writes.
             live_dets = []
 
-            for x1, y1, x2, y2, confidence in detections:
+            for det_idx, (x1, y1, x2, y2, confidence) in enumerate(detections):
                 crop = frame[y1:y2, x1:x2]
                 if crop.size == 0:
                     continue
@@ -1432,6 +1482,13 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                 if door_cfg.stacker is None:
                     door_cfg.stacker = StackingDecoder(decode_fn)
                 tokens, _ = door_cfg.stacker.decode(crop, now_wallclock)
+                if tokens:
+                    # Stamp the track's first successful decode; repeat
+                    # decodes of a held-up phone keep the original
+                    # stamp, so repeat grants report the original
+                    # presentation latency instead of the cooldown.
+                    door_cfg.tracks.mark_decoded(
+                        track_ids[det_idx], capture_ts or now_wallclock)
                 live_dets.append(
                     (int(x1), int(y1), int(x2), int(y2),
                      float(confidence),
@@ -1442,23 +1499,11 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                     now_t = time.time()
                     event_key = (door_cfg.name, token)
                     if now_t - last_event.get(event_key, 0) < EVENT_COOLDOWN:
-                        # A token re-decoding inside its cooldown means the
-                        # visitor was already served and simply hasn't
-                        # lowered the phone. Clear the burst marker so it
-                        # re-arms on the next frame; otherwise the whole
-                        # cooldown wait accumulates into the next event's
-                        # decode_ms and reads as a pathologically slow
-                        # decode (seen as 7-9s entries for a held-up phone).
-                        door_cfg.detect_start_capture_ts = None
                         continue
                     last_event[event_key] = now_t
 
-                    # Capture decode latency before we clear the burst
-                    # marker so the next visitor measures fresh.
-                    decode_ms = None
-                    if door_cfg.detect_start_capture_ts is not None:
-                        decode_ms = int((now_t - door_cfg.detect_start_capture_ts) * 1000)
-                    door_cfg.detect_start_capture_ts = None
+                    decode_ms = door_cfg.tracks.latency_ms(
+                        track_ids[det_idx])
 
                     door_cfg.token_count += 1
                     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
