@@ -326,7 +326,8 @@ class DoorController:
         # rediscovery (5s scan + 10s miss-retry) left the door dead
         # for ~20s for nothing.
         last_exc = None
-        for delay in (0, 0.5, 1.0):
+        retries = (0, 0.5, 1.0)
+        for attempt, delay in enumerate(retries, start=1):
             if delay:
                 time.sleep(delay)
             try:
@@ -338,6 +339,11 @@ class DoorController:
                 return True
             except (requests.ConnectionError, requests.Timeout) as e:
                 last_exc = e
+                # Surface each miss so a slow relay_ms badge is
+                # self-explanatory from the log, not archaeology.
+                print(f"[WARN] [{self.name}] {ip} "
+                      f"{type(e).__name__} on cached IP "
+                      f"(attempt {attempt}/{len(retries)})")
                 continue
             except Exception as e:
                 print(f"[{ts}] [{self.name}] DOOR ERROR: {e}")
