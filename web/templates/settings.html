@@ -31,7 +31,11 @@
             </div>
             <div class="door-details">
                 <span>Camera: {{ door.camera_uuid or 'Not set' }} <span class="camera-status" id="cam-status-{{ door.name }}"></span> <button class="btn-sm" onclick="showLiveView({{ door.id }}, '{{ door.name }}')">Live View</button></span>
+                {% if door.opener_type == 'onvif' %}
+                <span>Opener: Camera alarm out (ONVIF)</span>
+                {% else %}
                 <span>Shelly: {{ door.shelly_device_id or 'Not set' }} <button class="btn-sm" onclick="testShelly({{ door.id }})">Test</button> <span id="shelly-status-{{ door.id }}" style="font-size:0.85em;"></span></span>
+                {% endif %}
             </div>
         </div>
         {% endfor %}
@@ -1039,11 +1043,20 @@ function showAddDoor() {
             <label>Camera Path</label>
             <input type="text" name="camera_path" id="modal-camera-path" value="/stream2">
 
-            <label>Shelly Device</label>
-            <select name="shelly_device_id" id="modal-shelly-select">${shellyOpts}</select>
+            <label>Door opener</label>
+            <select name="opener_type" id="modal-opener-select" onchange="onOpenerSelect(this)">
+                <option value="shelly">Shelly device</option>
+                <option value="onvif">Camera alarm output (ONVIF)</option>
+            </select>
 
-            <label>Shelly Password</label>
-            <input type="text" name="shelly_pass">
+            <div id="modal-shelly-fields">
+                <label>Shelly Device</label>
+                <select name="shelly_device_id" id="modal-shelly-select">${shellyOpts}</select>
+
+                <label>Shelly Password</label>
+                <input type="text" name="shelly_pass">
+            </div>
+            <p id="modal-onvif-note" style="display:none;color:#888;font-size:0.85em;margin:0.3em 0 0.8em;">Uses the selected camera's ONVIF alarm output (relay auto-detected). No Shelly needed.</p>
 
             <label>Open Duration (seconds)</label>
             <input type="number" name="open_seconds" value="5" min="1" max="30">
@@ -1103,6 +1116,14 @@ async function doFetchRtsp(form, ip, xaddr, uuid) {
         btn.textContent = 'Fetch';
         alert('Failed to fetch RTSP URLs.');
     }
+}
+
+function onOpenerSelect(sel) {
+    const onvif = sel.value === 'onvif';
+    const sf = document.getElementById('modal-shelly-fields');
+    const note = document.getElementById('modal-onvif-note');
+    if (sf) sf.style.display = onvif ? 'none' : '';
+    if (note) note.style.display = onvif ? '' : 'none';
 }
 
 function onCameraSelect(sel) {

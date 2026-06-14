@@ -111,7 +111,9 @@ CREATE TABLE IF NOT EXISTS doors (
     camera_port INTEGER NOT NULL DEFAULT 554,
     shelly_device_id TEXT NOT NULL DEFAULT '',
     shelly_pass TEXT NOT NULL DEFAULT '',
-    open_seconds INTEGER NOT NULL DEFAULT 5
+    open_seconds INTEGER NOT NULL DEFAULT 5,
+    opener_type TEXT NOT NULL DEFAULT 'shelly',
+    relay_token TEXT NOT NULL DEFAULT 'auto'
 );
 
 CREATE TABLE IF NOT EXISTS access_log (
@@ -205,6 +207,16 @@ def init_db():
         db.execute("ALTER TABLE access_log ADD COLUMN decode_ms INTEGER DEFAULT NULL")
     if 'relay_ms' not in log_cols:
         db.execute("ALTER TABLE access_log ADD COLUMN relay_ms INTEGER DEFAULT NULL")
+
+    # Migrate doors table: opener_type selects the door-open actuator
+    # ('shelly' or 'onvif' camera alarm-out). Existing doors default to
+    # 'shelly' so behaviour is unchanged. relay_token names the ONVIF
+    # relay output ('auto' = discover the first one, e.g. AlarmOut_0).
+    door_cols = [r[1] for r in db.execute("PRAGMA table_info(doors)").fetchall()]
+    if 'opener_type' not in door_cols:
+        db.execute("ALTER TABLE doors ADD COLUMN opener_type TEXT NOT NULL DEFAULT 'shelly'")
+    if 'relay_token' not in door_cols:
+        db.execute("ALTER TABLE doors ADD COLUMN relay_token TEXT NOT NULL DEFAULT 'auto'")
 
     # Migrate tokens table: short_id for QR payload (6-char Crockford
     # base32 alias). Backfill assigns one to every existing row so the
@@ -513,14 +525,17 @@ def get_shellys():
 # --- Door helpers ---
 
 def create_door(name, camera_uuid, camera_user, camera_pass, camera_path,
-                camera_port, shelly_device_id, shelly_pass, open_seconds):
+                camera_port, shelly_device_id, shelly_pass, open_seconds,
+                opener_type='shelly', relay_token='auto'):
     def op(db):
         db.execute(
             "INSERT INTO doors (name, camera_uuid, camera_user, camera_pass, "
-            "camera_path, camera_port, shelly_device_id, shelly_pass, open_seconds) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "camera_path, camera_port, shelly_device_id, shelly_pass, open_seconds, "
+            "opener_type, relay_token) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (name, camera_uuid, camera_user, camera_pass, camera_path,
-             camera_port, shelly_device_id, shelly_pass, open_seconds))
+             camera_port, shelly_device_id, shelly_pass, open_seconds,
+             opener_type, relay_token))
         return db.execute("SELECT last_insert_rowid()").fetchone()[0]
     return _write(op)
 

@@ -383,6 +383,124 @@ class DoorController:
             return f"error: {e}"
 
 
+class OnvifRelayController:
+    """Door opener that drives an ONVIF camera's alarm relay output - no
+    Shelly. Mirrors DoorController's interface (open(token) -> bool,
+    cooldown, status()). On startup it puts the relay in Monostable mode
+    with DelayTime = open_seconds (fail-secure: the camera's own timer
+    re-locks the strike if this process dies); each open fires one
+    SetRelayOutputState active. Reuses the same WS-Security auth as RTSP.
+    """
+
+    def __init__(self, name, ip, username='', password='', open_seconds=5,
+                 relay_token='auto'):
+        self.name = name
+        self.ip = ip
+        self.username = username
+        self.password = password
+        self.open_seconds = open_seconds
+        self.relay_token = None if (not relay_token or relay_token == 'auto') \
+            else relay_token
+        self.dev_url = f"http://{ip}/onvif/device_service"
+        self._last_open = 0
+        self._cooldown = open_seconds + 2
+        self._lock = threading.Lock()
+        self._session = requests.Session()
+        self._configured = False
+        try:
+            self._ensure_configured()
+        except Exception as e:
+            # Camera may be booting / unreachable at startup; open() retries.
+            print(f"[WARN] [{name}] ONVIF relay init deferred: {e}")
+
+    def _call(self, body, timeout=8):
+        auth = (_onvif_ws_security_header(self.username, self.password)
+                if self.username else '')
+        env = ('<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"'
+               ' xmlns:tds="http://www.onvif.org/ver10/device/wsdl"'
+               ' xmlns:tt="http://www.onvif.org/ver10/schema">'
+               f'{auth}<soap:Body>{body}</soap:Body></soap:Envelope>')
+        return self._session.post(
+            self.dev_url, data=env.encode(),
+            headers={'Content-Type': 'application/soap+xml'}, timeout=timeout)
+
+    def _ensure_configured(self):
+        """Discover the relay token (when 'auto') and set Monostable +
+        DelayTime=open_seconds. Raises on an unreachable camera."""
+        if not self.relay_token:
+            r = self._call('<tds:GetRelayOutputs/>')
+            m = re.search(r'token="([^"]+)"', r.text)
+            if not m:
+                raise RuntimeError('no ONVIF relay output found')
+            self.relay_token = m.group(1)
+        delay = f"PT{int(self.open_seconds)}S"
+        self._call(
+            f"<tds:SetRelayOutputSettings><tds:RelayOutputToken>{self.relay_token}"
+            f"</tds:RelayOutputToken><tds:Properties><tt:Mode>Monostable</tt:Mode>"
+            f"<tt:DelayTime>{delay}</tt:DelayTime><tt:IdleState>closed</tt:IdleState>"
+            f"</tds:Properties></tds:SetRelayOutputSettings>")
+        self._configured = True
+        print(f"[INFO] [{self.name}] ONVIF relay {self.relay_token} "
+              f"configured Monostable/{delay} at {self.ip}")
+
+    def open(self, token):
+        """Fire one Monostable relay pulse. Returns True if accepted."""
+        with self._lock:
+            now = time.time()
+            if now - self._last_open < self._cooldown:
+                return False
+            self._last_open = now
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            if not self._configured or not self.relay_token:
+                self._ensure_configured()
+            r = self._call(
+                f"<tds:SetRelayOutputState><tds:RelayOutputToken>{self.relay_token}"
+                f"</tds:RelayOutputToken><tds:LogicalState>active</tds:LogicalState>"
+                f"</tds:SetRelayOutputState>")
+            if r.status_code == 200 and 'Fault' not in r.text:
+                print(f"[{ts}] [{self.name}] DOOR OPEN (ONVIF relay "
+                      f"{self.relay_token}) for {self.open_seconds}s "
+                      f"(token={token[:8]}...)")
+                return True
+            print(f"[{ts}] [{self.name}] DOOR ERROR: ONVIF relay HTTP "
+                  f"{r.status_code} {r.text[:160]}")
+        except Exception as e:
+            print(f"[{ts}] [{self.name}] DOOR ERROR: ONVIF relay "
+                  f"unreachable: {type(e).__name__}: {e}")
+        # A failed open must not burn the cooldown; re-resolve next time.
+        with self._lock:
+            self._last_open = 0
+        self._configured = False
+        return False
+
+    def status(self):
+        try:
+            r = self._call('<tds:GetRelayOutputs/>', timeout=5)
+            return ('ok' if (r.status_code == 200 and 'RelayOutputs' in r.text)
+                    else f'error: HTTP {r.status_code}')
+        except Exception as e:
+            return f"error: {e}"
+
+
+def onvif_relay_check(ip, username='', password='', timeout=5):
+    """Reachability probe for an ONVIF camera relay (used by the door
+    health monitor). Returns {'ok': bool, 'error': str|None}."""
+    try:
+        auth = _onvif_ws_security_header(username, password) if username else ''
+        env = ('<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"'
+               ' xmlns:tds="http://www.onvif.org/ver10/device/wsdl">'
+               f'{auth}<soap:Body><tds:GetRelayOutputs/></soap:Body></soap:Envelope>')
+        r = requests.post(f"http://{ip}/onvif/device_service", data=env.encode(),
+                          headers={'Content-Type': 'application/soap+xml'},
+                          timeout=timeout)
+        if r.status_code == 200 and 'RelayOutputs' in r.text:
+            return {'ok': True, 'error': None}
+        return {'ok': False, 'error': f'HTTP {r.status_code}'}
+    except Exception as e:
+        return {'ok': False, 'error': f'{type(e).__name__}: {e}'[:200]}
+
+
 # --- YOLO + QR decode ---
 
 def get_tensorrt_engine_path(model_size='s'):
@@ -1796,6 +1914,22 @@ def main():
         if args.dry_run:
             door_ctrl = None
             print(f"[INFO] [{name}] DRY RUN mode")
+        elif door_def.get('opener', 'shelly') == 'onvif':
+            # No-Shelly door: drive the camera's own ONVIF alarm relay.
+            cam_ip = resolve_camera_address(door_def['camera'],
+                                            discovered_cameras)
+            if cam_ip:
+                door_ctrl = OnvifRelayController(
+                    name, cam_ip,
+                    username=door_def.get('camera_user', ''),
+                    password=door_def.get('camera_pass', ''),
+                    open_seconds=open_seconds,
+                    relay_token=door_def.get('relay_token', 'auto'))
+                print(f"[INFO] [{name}] Opener: ONVIF camera relay at "
+                      f"{cam_ip} (relay={door_ctrl.relay_token or 'auto'})")
+            else:
+                print(f"[WARN] [{name}] ONVIF opener: camera not resolved")
+                door_ctrl = None
         else:
             shelly_spec = door_def.get('shelly', 'auto')
             if shelly_spec == 'auto':

@@ -384,6 +384,8 @@ def api_create_door():
         shelly_device_id=data.get('shelly_device_id', ''),
         shelly_pass=data.get('shelly_pass', ''),
         open_seconds=int(data.get('open_seconds', 5)),
+        opener_type=data.get('opener_type', 'shelly'),
+        relay_token=data.get('relay_token', 'auto'),
     )
 
     _try_export_config()
@@ -396,7 +398,7 @@ def api_update_door(door_id):
     data = request.get_json()
     allowed = ['name', 'camera_uuid', 'camera_user', 'camera_pass',
                'camera_path', 'camera_port', 'shelly_device_id',
-               'shelly_pass', 'open_seconds']
+               'shelly_pass', 'open_seconds', 'opener_type', 'relay_token']
     updates = {k: data[k] for k in allowed if k in data}
     if 'camera_port' in updates:
         updates['camera_port'] = int(updates['camera_port'])

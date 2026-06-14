@@ -23,6 +23,8 @@ def export_config(output_path="config/doors.yaml"):
             'camera_port': door['camera_port'],
             'shelly': door['shelly_device_id'] or 'auto',
             'open_seconds': door['open_seconds'],
+            'opener': door.get('opener_type') or 'shelly',
+            'relay_token': door.get('relay_token') or 'auto',
             'tokens': tokens,
         }
         if door['shelly_pass']:

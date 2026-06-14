@@ -150,7 +150,26 @@ def check_camera(door: dict, status_by_name: dict, now_ts: float) -> dict:
 
 
 def check_shelly(door: dict) -> dict:
-    """Returns {'ok': bool, 'detail': str, 'configured': bool}."""
+    """Relay-leg health, opener-aware. Returns {'ok', 'detail',
+    'configured'}. Kept the name for the email/reconcile shape; for an
+    ONVIF door it probes the camera's ONVIF relay (GetRelayOutputs)
+    instead of a Shelly RPC, so 'Relay unreachable' alarms cover both."""
+    opener = (door.get('opener_type') or 'shelly')
+    if opener == 'onvif':
+        uuid = (door.get('camera_uuid') or '').strip()
+        ip = next((c.get('ip') for c in db.get_cameras()
+                   if c.get('uuid') == uuid), None)
+        if not ip:
+            return {'ok': False, 'configured': True,
+                    'detail': 'camera IP not found (run Scan Network)'}
+        from qr_live import onvif_relay_check
+        r = onvif_relay_check(ip, door.get('camera_user', ''),
+                              door.get('camera_pass', ''))
+        return {
+            'ok': bool(r.get('ok')),
+            'detail': 'OK' if r.get('ok') else (r.get('error') or 'unreachable'),
+            'configured': True,
+        }
     if not (door.get('shelly_device_id') or '').strip():
         return {'ok': True, 'detail': 'not configured', 'configured': False}
     r = shelly_svc.check_door(door)
