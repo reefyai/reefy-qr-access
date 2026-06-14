@@ -427,6 +427,7 @@ class OnvifRelayController:
     def _ensure_configured(self):
         """Discover the relay token (when 'auto') and set Monostable +
         DelayTime=open_seconds. Raises on an unreachable camera."""
+        import re  # module imports re locally per-function (see ONVIF fns)
         if not self.relay_token:
             r = self._call('<tds:GetRelayOutputs/>')
             m = re.search(r'token="([^"]+)"', r.text)
