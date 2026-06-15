@@ -158,9 +158,11 @@ def main():
                         help='Process every Nth frame (default: 3)')
     parser.add_argument('--conf', type=float, default=0.3,
                         help='YOLO confidence threshold (default: 0.3)')
-    parser.add_argument('--model-size', default='s',
+    parser.add_argument('--model-size', default=os.environ.get('MODEL_SIZE', 'n'),
                         choices=['n', 's', 'm', 'l'],
-                        help='YOLO model size (default: s)')
+                        help='YOLO model size; env MODEL_SIZE overrides '
+                             '(default: n - ~2x faster than s on CPU-only '
+                             'devices, detects QRs fine; bump to s/m on GPU)')
     parser.add_argument('--web-only', action='store_true',
                         help='Run only the web UI, no detector')
     args = parser.parse_args()
