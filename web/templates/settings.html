@@ -349,7 +349,7 @@ Leave a field blank to use the built-in default template.">?</button>
 <section class="settings-pane" data-pane="system">
     <div class="page-settings-section" style="margin-bottom:1rem;">
         <h3>Detector</h3>
-        <div id="detector-info" style="font-size:0.9em;color:#ccc;line-height:1.7;">Loading…</div>
+        <div id="detector-info" style="font-size:0.9em;color:#e0e0e0;line-height:1.7;">Loading…</div>
     </div>
     <div class="header-row">
         <h2>System logs</h2>
@@ -1222,7 +1222,7 @@ async function scanInModal() {
         result.textContent = `found ${(data.cameras||[]).length} camera(s), ${shellyEntries.length} shelly(s)`;
     } else {
         result.textContent = 'scan failed';
-        result.style.color = '#e55';
+        result.style.color = '#ef4444';
     }
 }
 
