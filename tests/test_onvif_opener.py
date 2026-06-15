@@ -91,6 +91,17 @@ class OnvifRelayControllerTests(unittest.TestCase):
         self.assertFalse(c.open('tok12345abcdef'),
                          'open() must return False on a SOAP fault')
 
+    def test_regrant_cooldown_equals_open_seconds(self):
+        # Cooldown is the beep length (open_seconds), not open_seconds+2,
+        # so a repeat scan re-fires as soon as the open finishes.
+        c = qr_live.OnvifRelayController('d', '1.2.3.4', 'admin', 'pw',
+                                         open_seconds=5, relay_token='AlarmOut_0')
+        self.assertEqual(c._cooldown, 5)
+        self.assertTrue(c.open('tok'), 'first open should fire')
+        self.assertFalse(c.open('tok'), 'within cooldown -> blocked')
+        c._last_open -= 6  # pretend the open window (5s) has elapsed
+        self.assertTrue(c.open('tok'), 'after cooldown -> fires again')
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -211,7 +211,7 @@ class DoorController:
         self.open_seconds = open_seconds
         self._auth = HTTPDigestAuth("admin", password) if password else None
         self._last_open = 0
-        self._cooldown = open_seconds + 2
+        self._cooldown = open_seconds  # re-fire allowed once the pulse ends (= beep length)
         self._lock = threading.Lock()
         self._session = requests.Session()
         if self._auth:
@@ -403,7 +403,7 @@ class OnvifRelayController:
             else relay_token
         self.dev_url = f"http://{ip}/onvif/device_service"
         self._last_open = 0
-        self._cooldown = open_seconds + 2
+        self._cooldown = open_seconds  # re-fire allowed once the pulse ends (= beep length)
         self._lock = threading.Lock()
         self._session = requests.Session()
         self._configured = False
@@ -1452,12 +1452,15 @@ class DoorConfig:
     """Configuration for a single door."""
 
     def __init__(self, name, camera_url, door_controller, valid_tokens,
-                 url_builder=None):
+                 url_builder=None, open_seconds=5):
         self.name = name
         self.camera_url = camera_url
         self.door = door_controller
         self.valid_tokens = set(valid_tokens)
         self.url_builder = url_builder  # callable for ONVIF session refresh
+        # Beep/open length; also the same-token re-grant cooldown so a
+        # repeat scan re-fires as soon as the previous open finishes.
+        self.open_seconds = open_seconds
         self.camera = None  # set after starting
         self.token_count = 0
         self.door_opens = 0
@@ -1514,7 +1517,10 @@ def list_live_doors():
 
 # --- Main loop ---
 
-EVENT_COOLDOWN = 10  # seconds between duplicate events per door+token
+# Same-token re-grant cooldown is per-door = its open_seconds (beep
+# length): a held-up QR can't re-fire while the door is still open, but a
+# fresh present right after the beep re-grants immediately. See
+# DoorConfig.open_seconds and the per-token check below.
 
 
 def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
@@ -1620,10 +1626,13 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                      tokens[0] if tokens else None))
 
                 for token in tokens:
-                    # Cooldown: skip if same door+token seen recently
+                    # Cooldown: skip if same door+token granted within the
+                    # door's open window (beep length). Matches the relay
+                    # controller's cooldown so a repeat scan re-fires as
+                    # soon as the previous open finishes - not before.
                     now_t = time.time()
                     event_key = (door_cfg.name, token)
-                    if now_t - last_event.get(event_key, 0) < EVENT_COOLDOWN:
+                    if now_t - last_event.get(event_key, 0) < door_cfg.open_seconds:
                         continue
                     last_event[event_key] = now_t
 
@@ -1957,7 +1966,8 @@ def main():
         print(f"[INFO] [{name}] Valid tokens: {len(valid_tokens)}")
 
         doors.append(DoorConfig(name, camera_url, door_ctrl, valid_tokens,
-                               url_builder=url_builder))
+                               url_builder=url_builder,
+                               open_seconds=open_seconds))
 
     # Shared GPU detector
     det_type, det_model = create_detector(model_size=args.model_size)
