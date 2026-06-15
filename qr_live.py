@@ -62,6 +62,23 @@ try:
 except ImportError:
     HAS_ZXINGCPP = False
 
+
+def _detect_gpu():
+    """True only when a usable NVIDIA GPU is present (driver loaded).
+    torch.cuda.is_available() checks the actual driver, so a CUDA image
+    on a GPU-less host returns False. One source of truth so we never
+    attempt GPU-only paths (TensorRT, h264_nvenc) on a CPU-only device."""
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+# Single GPU switch, evaluated once at import. Drives detector backend,
+# default model size, and the event-clip video encoder.
+HAS_GPU = _detect_gpu()
+
 DEFAULT_CONFIG = {
     'doors': [{
         'name': 'Default Door',
@@ -511,7 +528,9 @@ def get_tensorrt_engine_path(model_size='s'):
 
 
 def create_detector(model_size='s'):
-    if HAS_ULTRALYTICS:
+    # TensorRT is GPU-only; don't even look for an engine on a CPU-only
+    # host (avoids a pointless CUDA spin-up before the PyTorch fallback).
+    if HAS_ULTRALYTICS and HAS_GPU:
         engine_path = get_tensorrt_engine_path(model_size)
         if engine_path.exists():
             print(f"[INFO] Loading TensorRT engine: {engine_path}")
@@ -1421,7 +1440,11 @@ class VideoLogger:
         # Re-encode to H.264 for browser playback (try NVENC GPU, fallback CPU)
         import subprocess
         encoded = False
-        for codec, preset in [('h264_nvenc', 'p1'), ('libx264', 'ultrafast')]:
+        # nvenc is GPU-only: on a CPU-only host it fails every event and
+        # wastes a process spawn, so skip straight to libx264 there.
+        codecs = ([('h264_nvenc', 'p1'), ('libx264', 'ultrafast')]
+                  if HAS_GPU else [('libx264', 'ultrafast')])
+        for codec, preset in codecs:
             try:
                 result = subprocess.run([
                     'ffmpeg', '-y', '-i', tmp_path,
@@ -1854,9 +1877,9 @@ def main():
     # Shared args
     parser.add_argument('--skip', type=int, default=3,
                         help='Process every Nth frame (default: 3)')
-    parser.add_argument('--model-size', default='s',
-                        choices=['n', 's', 'm', 'l'],
-                        help='YOLO model size (default: s)')
+    parser.add_argument('--model-size', default='auto',
+                        choices=['auto', 'n', 's', 'm', 'l'],
+                        help='YOLO model size; auto = n on CPU, s on GPU')
     parser.add_argument('--conf', type=float, default=0.3,
                         help='Detection confidence threshold (default: 0.3)')
     parser.add_argument('--dry-run', action='store_true',
@@ -1974,7 +1997,14 @@ def main():
                                url_builder=url_builder,
                                open_seconds=open_seconds))
 
-    # Shared GPU detector
+    # Resolve 'auto' model size from the one GPU switch: nano on CPU-only
+    # hosts (keeps up with the frame rate), small on GPU (full accuracy).
+    if args.model_size == 'auto':
+        args.model_size = 's' if HAS_GPU else 'n'
+    print(f"[INFO] GPU: {'yes' if HAS_GPU else 'no'} -> model={args.model_size}, "
+          f"video encoder={'h264_nvenc->libx264' if HAS_GPU else 'libx264'}")
+
+    # Shared detector (GPU TensorRT when available, else PyTorch on CPU)
     det_type, det_model = create_detector(model_size=args.model_size)
     decode_fn = create_decoder()
 
