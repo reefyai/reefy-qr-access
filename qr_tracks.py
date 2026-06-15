@@ -94,6 +94,22 @@ class QrTracks:
         if tr is not None and tr['first_decoded'] is None:
             tr['first_decoded'] = ts
 
+    def reset_after_grant(self, track_id, ts):
+        """Restart a track's decode-latency measurement after its grant.
+
+        Without this, a code parked permanently in frame (one long-lived
+        track) reports the SAME frozen first-presentation latency on every
+        repeat grant. Resetting on grant makes the next grant measure that
+        cycle's own decode latency. Safe w.r.t. the cooldown: we reset at
+        the grant, so the next measurement spans only the next decode, not
+        the inter-grant cooldown. Read latency_ms() for the CURRENT grant
+        BEFORE calling this."""
+        tr = self._tracks.get(track_id)
+        if tr is not None:
+            tr['first_seen'] = ts
+            tr['last_seen'] = ts
+            tr['first_decoded'] = None
+
     def latency_ms(self, track_id):
         """first_decoded - first_seen for the track, in ms; None when
         unknown (track expired or never decoded)."""

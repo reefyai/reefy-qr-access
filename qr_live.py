@@ -1682,6 +1682,11 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                         else:
                             print(f"[{ts}] [{door_cfg.name}] DRY RUN: "
                                   f"would open door")
+                        # Restart this region's decode-latency measurement
+                        # so the next grant of a parked/held code reports
+                        # its own cycle's latency, not the frozen first one.
+                        door_cfg.tracks.reset_after_grant(
+                            track_ids[det_idx], capture_ts or now_wallclock)
                     else:
                         event = "ACCESS-DENIED"
                         door_cfg.denied_count += 1

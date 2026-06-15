@@ -104,6 +104,22 @@ class QrTracksTests(unittest.TestCase):
             ids.update(tr.update([b], ts=100.0 + i * 0.03))
         self.assertEqual(len(ids), 1)
 
+    def test_reset_after_grant_remeasures(self):
+        # Parked QR: first presentation took 7.8s to decode; without a
+        # reset every repeat grant reports that frozen 7.8s.
+        tr = QrTracks()
+        (tid,) = tr.update([PHONE_NEAR], ts=100.0)
+        tr.mark_decoded(tid, ts=107.8)
+        self.assertEqual(tr.latency_ms(tid), 7800)   # frozen first value
+        # On grant we reset; the still-parked code decodes 0.5s into the
+        # next cycle -> next grant reports 500ms, not the stale 7800.
+        tr.reset_after_grant(tid, ts=110.0)
+        self.assertIsNone(tr.latency_ms(tid))        # cleared until next decode
+        same = tr.update([PHONE_NEAR], ts=110.3)[0]
+        self.assertEqual(same, tid)                  # same track (IoU), not aged
+        tr.mark_decoded(tid, ts=110.5)
+        self.assertEqual(tr.latency_ms(tid), 500)    # 110.5 - 110.0
+
 
 if __name__ == '__main__':
     unittest.main()
