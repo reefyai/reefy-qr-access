@@ -50,7 +50,7 @@
             <td data-label="Token" class="token-cell">{{ e.token[:8] }}...</td>
             <td data-label="Decode">
                 {% if e.decode_ms is not none %}
-                <span class="decode-badge {{ 'decode-fast' if e.decode_ms <= 1000 else ('decode-mid' if e.decode_ms <= 3000 else 'decode-slow') }}">{{ '%.1fs' % (e.decode_ms / 1000.0) }}</span>
+                <span class="decode-badge {{ 'decode-fast' if e.decode_ms <= 1000 else ('decode-mid' if e.decode_ms <= 3000 else 'decode-slow') }}">{{ e.decode_ms }}ms</span>
                 {% else %}
                 <span class="no-video">—</span>
                 {% endif %}
@@ -202,10 +202,10 @@ function _renderRow(e) {
     }
     let decodeCell;
     if (e.decode_ms != null) {
-        const secs = (e.decode_ms / 1000).toFixed(1) + 's';
+        const disp = e.decode_ms + 'ms';
         const cls = e.decode_ms <= 1000 ? 'decode-fast'
                   : e.decode_ms <= 3000 ? 'decode-mid' : 'decode-slow';
-        decodeCell = `<span class="decode-badge ${cls}">${secs}</span>`;
+        decodeCell = `<span class="decode-badge ${cls}">${disp}</span>`;
     } else {
         decodeCell = '<span class="no-video">&mdash;</span>';
     }
