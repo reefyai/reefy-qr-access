@@ -79,6 +79,35 @@ def _detect_gpu():
 # default model size, and the event-clip video encoder.
 HAS_GPU = _detect_gpu()
 
+
+def _gpu_name():
+    """Marketing name of the active GPU (e.g. 'NVIDIA RTX 3060'), or ''."""
+    if not HAS_GPU:
+        return ''
+    try:
+        import torch
+        return torch.cuda.get_device_name(0)
+    except Exception:
+        return 'GPU'
+
+
+def _cpu_name():
+    """First CPU model-name line from /proc/cpuinfo, or ''."""
+    try:
+        with open('/proc/cpuinfo') as f:
+            for line in f:
+                if line.startswith('model name'):
+                    return line.split(':', 1)[1].strip()
+    except Exception:
+        pass
+    return ''
+
+
+# Runtime detector facts surfaced to the web UI (Settings -> System ->
+# Detector). Static fields filled in main(); 'fps' refreshed each status
+# tick by run_multi_door. Read in-process by web/app.py (/api/system).
+DETECTOR_INFO = {}
+
 DEFAULT_CONFIG = {
     'doors': [{
         'name': 'Default Door',
@@ -1788,6 +1817,7 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
             print(f"[STATUS] {total_processed} processed, "
                   f"{fps:.1f} FPS | "
                   f"{' | '.join(parts)}")
+            DETECTOR_INFO['fps'] = round(fps, 1)
             interval_processed = 0
             last_status = now
 
@@ -2007,6 +2037,17 @@ def main():
     # Shared detector (GPU TensorRT when available, else PyTorch on CPU)
     det_type, det_model = create_detector(model_size=args.model_size)
     decode_fn = create_decoder()
+
+    DETECTOR_INFO.update({
+        'gpu': HAS_GPU,
+        'gpu_name': _gpu_name(),
+        'cpu_name': _cpu_name(),
+        'backend': ('TensorRT' if det_type == 'tensorrt'
+                    else ('PyTorch/CUDA' if HAS_GPU else 'PyTorch/CPU')),
+        'model': args.model_size,
+        'encoder': 'h264_nvenc->libx264' if HAS_GPU else 'libx264',
+        'fps': None,
+    })
 
     video_logger = VideoLogger(args.video_log_dir)
     print(f"[INFO] Video logs: {args.video_log_dir}")

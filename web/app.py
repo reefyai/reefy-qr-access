@@ -520,6 +520,19 @@ def api_camera_status():
     return jsonify({})
 
 
+@app.route('/api/system', methods=['GET'])
+@login_required
+def api_system():
+    """Runtime detector facts for Settings -> System -> Detector
+    (GPU/CPU, backend, model, encoder, live FPS). The detector runs in
+    this same process, so we read its module-level info directly."""
+    try:
+        import qr_live
+        return jsonify(qr_live.DETECTOR_INFO or {})
+    except Exception:
+        return jsonify({})
+
+
 # --- System logs ---
 
 @app.route('/system-logs')

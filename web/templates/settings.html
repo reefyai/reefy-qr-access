@@ -347,6 +347,10 @@ Leave a field blank to use the built-in default template.">?</button>
 <!-- SYSTEM TAB (live system logs)                              -->
 <!-- ========================================================== -->
 <section class="settings-pane" data-pane="system">
+    <div class="page-settings-section" style="margin-bottom:1rem;">
+        <h3>Detector</h3>
+        <div id="detector-info" style="font-size:0.9em;color:#ccc;line-height:1.7;">Loading…</div>
+    </div>
     <div class="header-row">
         <h2>System logs</h2>
         <div>
@@ -382,8 +386,35 @@ function showSettingsTab(name) {
     }
     // Lazy-init: only open the syslog SSE on first System tab view, so
     // we don't keep an EventSource open for users who never look at it.
-    if (name === 'system') syslogInit();
+    if (name === 'system') { syslogInit(); detectorInfoInit(); }
     if (name === 'monitoring') monitorInit();
+}
+
+let _detectorTimer = null;
+function _row(label, val) {
+    return `<div><span style="color:#888;display:inline-block;min-width:90px;">${label}</span>${val}</div>`;
+}
+async function loadDetectorInfo() {
+    const el = document.getElementById('detector-info');
+    if (!el) return;
+    try {
+        const res = await api('/api/system', 'GET');
+        const d = res.ok ? await res.json() : {};
+        if (!d || d.gpu === undefined) { el.textContent = 'Detector not running.'; return; }
+        const compute = d.gpu ? ('GPU — ' + (d.gpu_name || 'NVIDIA')) : 'CPU (no GPU)';
+        let html = _row('Compute', compute);
+        if (!d.gpu && d.cpu_name) html += _row('CPU', d.cpu_name);
+        html += _row('Backend', d.backend || '—');
+        html += _row('Model', 'YOLOv8-' + (d.model || '?'));
+        html += _row('Encoder', d.encoder || '—');
+        html += _row('FPS', (d.fps == null ? '—' : d.fps));
+        el.innerHTML = html;
+    } catch (e) { el.textContent = 'Failed to load.'; }
+}
+function detectorInfoInit() {
+    loadDetectorInfo();
+    if (_detectorTimer) clearInterval(_detectorTimer);
+    _detectorTimer = setInterval(loadDetectorInfo, 10000);  // refresh FPS
 }
 (function initSettingsTab() {
     const valid = ['doors', 'integrations', 'email', 'monitoring', 'system'];
