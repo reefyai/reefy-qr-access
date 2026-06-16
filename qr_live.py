@@ -29,6 +29,9 @@ import requests
 from requests.auth import HTTPDigestAuth
 from pathlib import Path
 
+import video_decode
+import pipeline
+
 from qr_tracks import QrTracks
 from datetime import datetime
 
@@ -104,9 +107,14 @@ def _cpu_name():
 
 
 # Runtime detector facts surfaced to the web UI (Settings -> System ->
-# Detector). Static fields filled in main(); 'fps' refreshed each status
-# tick by run_multi_door. Read in-process by web/app.py (/api/system).
+# Detector). Static fields filled in main(); 'fps' and 'video_decode'
+# refreshed each status tick by run_multi_door. Read in-process by
+# web/app.py (/api/system).
 DETECTOR_INFO = {}
+
+# Video decode backend (nvdec/vaapi/cpu) used by every CameraReader.
+# Resolved once in main() from --decode-backend / DECODE_BACKEND.
+VIDEO_DECODE_BACKEND = 'cpu'
 
 DEFAULT_CONFIG = {
     'doors': [{
@@ -1315,31 +1323,28 @@ class CameraReader(threading.Thread):
 
     def run(self):
         global _running
-        # Minimize FFmpeg internal buffer to reduce RTSP latency
-        os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = \
-            'rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;500000'
-
         while _running and not self._stopped:
             # Refresh URL if we have a builder (e.g. ONVIF session URLs)
             if self._url_builder:
                 fresh = self._url_builder()
                 if fresh:
                     self.url = fresh
-            cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
-            if not cap.isOpened():
+            # Pick the decode backend (nvdec/vaapi/cpu); hardware paths
+            # fall back to cpu cleanly inside open_reader.
+            reader = video_decode.open_reader(
+                self.url, VIDEO_DECODE_BACKEND, self.name)
+            if reader is None:
                 print(f"[WARN] [{self.name}] Cannot open stream, retrying...")
                 time.sleep(2)
                 continue
 
-            self._w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            self._h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            self._fps = cap.get(cv2.CAP_PROP_FPS) or 15.0
+            self._w = reader.width
+            self._h = reader.height
+            self._fps = reader.fps or 15.0
             self._max_buffer = int(self._fps * self._buffer_seconds) + 10
-            print(f"[INFO] [{self.name}] Stream opened: "
-                  f"{self._w}x{self._h} @ {self._fps:.1f} FPS")
 
             while _running and not self._stopped:
-                ret, frame = cap.read()
+                ret, frame = reader.read()
                 if not ret:
                     print(f"[WARN] [{self.name}] Frame read failed, "
                           f"reconnecting...")
@@ -1354,7 +1359,7 @@ class CameraReader(threading.Thread):
                         self._ring_buffer = \
                             self._ring_buffer[-self._max_buffer:]
 
-            cap.release()
+            reader.release()
             if _running:
                 time.sleep(1)
 
@@ -1575,9 +1580,9 @@ def list_live_doors():
 # DoorConfig.open_seconds and the per-token check below.
 
 
-def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
+def run_multi_door(doors, detector, decode_fn, conf=0.3, skip=1,
                    video_logger=None):
-    """Main loop: process all doors, sharing GPU for YOLO inference."""
+    """Main loop: process all doors, sharing the detector for YOLO."""
     global _running, _camera_readers
 
     # Stop any leftover camera readers from previous run
@@ -1635,9 +1640,8 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
             total_processed += 1
             interval_processed += 1
 
-            # YOLO detection (GPU, shared)
-            detections = detect_qr_regions(det_type, det_model, frame,
-                                           conf=conf)
+            # YOLO detection on the active backend (cpu/igpu/gpu)
+            detections = detector.detect(frame, conf=conf)
 
             # Assign each detection to a per-region track; decode
             # latency is measured per track (first_seen ->
@@ -1818,6 +1822,11 @@ def run_multi_door(doors, det_type, det_model, decode_fn, conf=0.3, skip=1,
                   f"{fps:.1f} FPS | "
                   f"{' | '.join(parts)}")
             DETECTOR_INFO['fps'] = round(fps, 1)
+            # Reflect the backend a stream actually decoded with (a failed
+            # hardware path falls back to cpu).
+            active = video_decode.get_active()
+            if active:
+                DETECTOR_INFO['video_decode'] = active
             interval_processed = 0
             last_status = now
 
@@ -1910,6 +1919,18 @@ def main():
     parser.add_argument('--model-size', default='auto',
                         choices=['auto', 'n', 's', 'm', 'l'],
                         help='YOLO model size; auto = n on CPU, s on GPU')
+    parser.add_argument('--pipeline-backend',
+                        default=os.environ.get('PIPELINE_BACKEND', 'auto'),
+                        choices=['auto', 'cpu', 'igpu', 'gpu'],
+                        help='Decode+detect backend; env PIPELINE_BACKEND '
+                             'overrides. auto = gpu on NVIDIA, igpu on an '
+                             'Intel/AMD iGPU, else cpu. Sets the decode '
+                             'backend unless --decode-backend overrides.')
+    parser.add_argument('--decode-backend',
+                        default=os.environ.get('DECODE_BACKEND', 'auto'),
+                        choices=['auto', 'nvdec', 'vaapi', 'cpu'],
+                        help='Override the video decode backend; auto = '
+                             'derive from --pipeline-backend.')
     parser.add_argument('--conf', type=float, default=0.3,
                         help='Detection confidence threshold (default: 0.3)')
     parser.add_argument('--dry-run', action='store_true',
@@ -2031,28 +2052,48 @@ def main():
     # hosts (keeps up with the frame rate), small on GPU (full accuracy).
     if args.model_size == 'auto':
         args.model_size = 's' if HAS_GPU else 'n'
-    print(f"[INFO] GPU: {'yes' if HAS_GPU else 'no'} -> model={args.model_size}, "
-          f"video encoder={'h264_nvenc->libx264' if HAS_GPU else 'libx264'}")
 
-    # Shared detector (GPU TensorRT when available, else PyTorch on CPU)
-    det_type, det_model = create_detector(model_size=args.model_size)
+    # Resolve the pipeline backend (cpu/igpu/gpu): pairs the video decode
+    # backend with the YOLO detector backend so decode + detect run on the
+    # same device. The decode backend can still be overridden explicitly.
+    pipeline_backend = pipeline.detect_pipeline_backend(args.pipeline_backend)
+    global VIDEO_DECODE_BACKEND
+    if args.decode_backend == 'auto':
+        VIDEO_DECODE_BACKEND = pipeline.decode_backend_for(pipeline_backend)
+    else:
+        VIDEO_DECODE_BACKEND = args.decode_backend
+
+    # Build the detector for the backend; falls back to PyTorch-CPU on any
+    # hardware/export failure (never takes a door offline).
+    detector, actual_backend = pipeline.build_detector(
+        pipeline_backend, args.model_size)
     decode_fn = create_decoder()
+
+    di = detector.info()
+    print(f"[INFO] pipeline={actual_backend} -> decode={VIDEO_DECODE_BACKEND}, "
+          f"detect={di['detect']}@{di['detect_device']}, "
+          f"model=YOLOv8-{args.model_size}, "
+          f"video encoder={'h264_nvenc->libx264' if HAS_GPU else 'libx264'}")
 
     DETECTOR_INFO.update({
         'gpu': HAS_GPU,
         'gpu_name': _gpu_name(),
         'cpu_name': _cpu_name(),
-        'backend': ('TensorRT' if det_type == 'tensorrt'
-                    else ('PyTorch/CUDA' if HAS_GPU else 'PyTorch/CPU')),
+        'pipeline': actual_backend,
+        'backend': di['detect'],
+        'detect_device': di['detect_device'],
         'model': args.model_size,
         'encoder': 'h264_nvenc->libx264' if HAS_GPU else 'libx264',
+        # Detected decode backend; refreshed to the actually-used one
+        # (which may fall back to cpu) by run_multi_door once a stream opens.
+        'video_decode': VIDEO_DECODE_BACKEND,
         'fps': None,
     })
 
     video_logger = VideoLogger(args.video_log_dir)
     print(f"[INFO] Video logs: {args.video_log_dir}")
 
-    run_multi_door(doors, det_type, det_model, decode_fn,
+    run_multi_door(doors, detector, decode_fn,
                    conf=args.conf, skip=args.skip,
                    video_logger=video_logger)
 

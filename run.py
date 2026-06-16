@@ -104,7 +104,8 @@ def run_web(port, password):
             use_reloader=False, threaded=True)
 
 
-def run_detector(config_path, skip, conf, model_size):
+def run_detector(config_path, skip, conf, model_size, decode_backend,
+                 pipeline_backend):
     """Start the QR detector/door opener. Restarts on reload_event."""
     import qr_live
 
@@ -129,6 +130,8 @@ def run_detector(config_path, skip, conf, model_size):
             '--skip', str(skip),
             '--conf', str(conf),
             '--model-size', model_size,
+            '--decode-backend', decode_backend,
+            '--pipeline-backend', pipeline_backend,
         ]
 
         qr_live.set_reload_event(reload_event)
@@ -163,6 +166,17 @@ def main():
                         help='YOLO model size; env MODEL_SIZE overrides. '
                              'auto = n on CPU-only hosts (~2x faster, detects '
                              'QRs fine), s when a GPU is present (full accuracy)')
+    parser.add_argument('--pipeline-backend',
+                        default=os.environ.get('PIPELINE_BACKEND', 'auto'),
+                        choices=['auto', 'cpu', 'igpu', 'gpu'],
+                        help='Decode+detect backend; env PIPELINE_BACKEND '
+                             'overrides. auto = gpu on NVIDIA, igpu on an '
+                             'Intel/AMD iGPU, else cpu (software).')
+    parser.add_argument('--decode-backend',
+                        default=os.environ.get('DECODE_BACKEND', 'auto'),
+                        choices=['auto', 'nvdec', 'vaapi', 'cpu'],
+                        help='Override the video decode backend; auto = '
+                             'derive from --pipeline-backend.')
     parser.add_argument('--web-only', action='store_true',
                         help='Run only the web UI, no detector')
     args = parser.parse_args()
@@ -175,7 +189,8 @@ def main():
     print(f"[INFO] Config:    {args.config}")
     if not args.web_only:
         print(f"[INFO] Detector:  skip={args.skip}, conf={args.conf}, "
-              f"model={args.model_size}")
+              f"model={args.model_size}, pipeline={args.pipeline_backend}, "
+              f"decode={args.decode_backend}")
 
     # Start web UI in background thread
     web_thread = threading.Thread(
@@ -193,7 +208,8 @@ def main():
         # Give web UI a moment to start
         time.sleep(2)
         # Run detector in main thread (handles signals)
-        run_detector(args.config, args.skip, args.conf, args.model_size)
+        run_detector(args.config, args.skip, args.conf, args.model_size,
+                     args.decode_backend, args.pipeline_backend)
 
 
 if __name__ == '__main__':

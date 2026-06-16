@@ -2,12 +2,17 @@ FROM nvidia/cuda:12.9.0-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System deps for OpenCV, pyzbar
+# System deps for OpenCV, pyzbar.
+# ffmpeg/ffprobe (system build, VAAPI + NVDEC capable) drive the
+# hardware video-decode path; intel-media-va-driver + libva provide the
+# Intel iGPU VAAPI backend. See docs/decode-backends.md.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-dev \
     libzbar0 \
     libgl1 libglib2.0-0 \
     ffmpeg \
+    intel-media-va-driver libva2 libva-drm2 vainfo \
+    intel-opencl-icd \
     fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
@@ -24,8 +29,14 @@ RUN pip3 install --break-system-packages --no-cache-dir \
     tensorrt
 
 # ML pipeline (mid-weight, changes occasionally).
+# openvino drives the Intel-iGPU detector backend; onnx/onnxslim are
+# needed by ultralytics to export the TensorRT engine (gpu backend, built
+# on first run per device). See pipeline.py / docs/decode-backends.md.
 RUN pip3 install --break-system-packages --no-cache-dir \
     ultralytics \
+    openvino \
+    onnx \
+    onnxslim \
     opencv-python-headless \
     numpy
 
@@ -50,8 +61,12 @@ ENV MODEL_CACHE=/models
 ENV PYTHONUNBUFFERED=1
 RUN mkdir -p /models
 
-COPY qr_live.py qr_tracks.py run.py ./
+COPY qr_live.py qr_tracks.py video_decode.py pipeline.py run.py ./
 COPY web/ web/
 COPY reefy/ reefy/
+# tests/ carries the full-pipeline perf benchmark (pipeline_bench.py) the
+# perf-regression gate runs inside the image. Small; no test deps installed.
+COPY tests/ tests/
+COPY tools/ tools/
 
 CMD ["python3", "run.py"]

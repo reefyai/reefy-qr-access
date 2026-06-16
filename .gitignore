@@ -28,3 +28,6 @@ tmp/
 
 # Claude Code
 .claude/
+
+# perf-regression ssh targets (device access URLs - do not commit)
+tools/perf-boxes.json

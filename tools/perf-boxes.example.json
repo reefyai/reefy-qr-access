@@ -1,0 +1,4 @@
+{
+  "intel-igpu": "user@<intel-igpu-box-ssh-host>",
+  "nvidia-gpu": "user@<nvidia-gpu-box-ssh-host>"
+}

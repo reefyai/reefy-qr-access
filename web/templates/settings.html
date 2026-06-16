@@ -401,11 +401,31 @@ async function loadDetectorInfo() {
         const res = await api('/api/system', 'GET');
         const d = res.ok ? await res.json() : {};
         if (!d || d.gpu === undefined) { el.textContent = 'Detector not running.'; return; }
+        const pipeLabels = {
+            cpu: 'CPU (software)',
+            igpu: 'Intel iGPU',
+            gpu: 'NVIDIA GPU',
+        };
+        let html = '';
+        if (d.pipeline) {
+            html += _row('Pipeline',
+                '<strong>' + (pipeLabels[d.pipeline] || d.pipeline) +
+                '</strong>');
+        }
         const compute = d.gpu ? ('GPU — ' + (d.gpu_name || 'NVIDIA')) : 'CPU (no GPU)';
-        let html = _row('Compute', compute);
+        html += _row('Compute', compute);
         if (!d.gpu && d.cpu_name) html += _row('CPU', d.cpu_name);
-        html += _row('Backend', d.backend || '—');
+        html += _row('Backend', (d.backend || '—') +
+            (d.detect_device ? ' (' + d.detect_device + ')' : ''));
         html += _row('Model', 'YOLOv8-' + (d.model || '?'));
+        const decLabels = {
+            nvdec: 'NVDEC (NVIDIA)',
+            vaapi: 'VAAPI (Intel/AMD iGPU)',
+            cpu: 'CPU (software)',
+        };
+        const dec = d.video_decode
+            ? (decLabels[d.video_decode] || d.video_decode) : '—';
+        html += _row('Video decode', dec);
         html += _row('Encoder', d.encoder || '—');
         html += _row('FPS', (d.fps == null ? '—' : d.fps));
         el.innerHTML = html;
