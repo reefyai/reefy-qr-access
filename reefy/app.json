@@ -27,7 +27,9 @@
       "backup": []
     }
   },
-  "env": {},
+  "env": {
+    "TARGET_FPS": "10"
+  },
   "gpu": true,
   "devices": [
     "/dev/dri"
