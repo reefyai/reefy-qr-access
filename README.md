@@ -25,27 +25,81 @@ across the common access methods - quick comparison below.
 ## Architecture
 
 ```
-RTSP camera
+RTSP camera (sub-stream)
     │
-    ▼
-FFmpeg H.264 software decode (CPU, via cv2.VideoCapture)
+    ▼  decode      cpu: cv2/ffmpeg   igpu: VAAPI   gpu: NVDEC
+raw frame
     │
-    ▼
-YOLOv8 region detection (TensorRT FP16 on GPU)
+    ▼  detect      cpu: PyTorch      igpu: OpenVINO   gpu: ONNX Runtime (CUDA)
+QR bounding boxes (YOLOv8)
     │
-    ▼
-zxing-cpp QR data decode (CPU, on small crops)
+    ▼  decode QR   zxing-cpp / pyzbar (CPU) on the small detected crop only
+token
     │
-    ▼
-token lookup (SQLite)  ──►  Shelly relay unlocks door
+    ▼  token lookup (SQLite)  ──►  Shelly / ONVIF relay unlocks door
     │
-    ▼
-access_log row + MQTT event
+    ▼  access_log row + MQTT event
 ```
 
-Per-camera CPU is dominated by software H.264 decode (~1 core at 720p).
-Migrating decode to NVDEC (PyNvVideoCodec or `hwaccel;cuvid` via FFmpeg)
-is tracked as a future improvement.
+Decode + detect form one **pipeline backend** (`cpu` / `igpu` / `gpu`),
+auto-selected at startup (NVIDIA → gpu, Intel/AMD iGPU → igpu, else cpu)
+and shown in **Settings → System → Detector**. Any hardware path degrades
+cleanly to CPU - a missing driver never takes a door offline. Detection
+runs on the accelerator; only the small detected crop is read back to the
+CPU for the QR-decode libraries.
+
+We measured that **inference, not video decode, dominates CPU** - so the
+accelerator is pointed at detection (the gpu path uses ONNX Runtime, not
+ultralytics' TensorRT-engine export, to avoid a fragile dependency
+chain). See [docs/gpu-pipeline.md](docs/gpu-pipeline.md) and
+[docs/decode-backends.md](docs/decode-backends.md) for the full
+investigation. The image ships on a `cudnn-runtime` CUDA base (no
+toolkit) - ~12 GB, down ~42% from the original ~21 GB.
+
+## Performance
+
+Detection is throttled to a time-based `target_fps` per door (env
+`TARGET_FPS`, default 5; this deployment runs 10), independent of the
+camera's stream fps. With an accelerated pipeline the detector has ample
+headroom, so reaction time is bounded by the frame cadence, not compute.
+
+**Detector latency** (single 640×360 stream, via
+`tools/run_perf_regression.py`):
+
+| Backend | Detect / frame | vs CPU |
+|---|---|---|
+| CPU (PyTorch) — Intel i5-7260U | ~135 ms | 1× |
+| **iGPU (OpenVINO)** — Intel i5-7260U | **~27 ms** | ~5× |
+| CPU (PyTorch) — Ryzen 5 5600X | ~61 ms | 1× |
+| **GPU (ONNX Runtime, CUDA)** — RTX 5060 Ti | **~4 ms** | ~15× |
+
+**End-to-end reaction** (QR enters frame → token decoded), measured live
+on the Intel iGPU box at 10 fps: **~100 ms, steady**. That ≈ the 10 fps
+frame interval, so reaction is cadence-bound (the detector is only
+~27 ms) - a higher-fps camera sub-stream would lower it further.
+
+### Reaction time vs other access methods
+
+QR is usually the *slowest* access method, because it relies on a person
+aligning a phone plus a cloud round-trip. By auto-detecting a shown code
+at a fixed camera, this system moves QR into the face-recognition / RFID
+class:
+
+| Method | Typical reaction |
+|---|---|
+| RFID / NFC card or fob | ~0.1-0.15 s |
+| Face-recognition terminal | ~0.2 s (best <0.1 s) |
+| Fingerprint | ~0.5 s |
+| BLE / phone unlock | ~0.3-2 s (incl. connection setup) |
+| QR — typical systems | ~2-5 s |
+| **QR — this system (measured)** | **~0.1 s** |
+
+These are recognition/read times; total door-open adds the lock/relay
+actuation, comparable across methods. Figures from vendor specs and
+published studies: [Hikvision MinMoe (0.2 s)](https://www.sourcesecurity.com/hikvision-minmoe-face-recognition-terminal-access-control-reader-technical-details.html),
+[RFID read time](https://www.rfidjournal.com/ask-the-experts/how-much-time-is-required-to-read-an-rfid-tag/),
+[BLE latency](https://pmc.ncbi.nlm.nih.gov/articles/PMC4327007/),
+[QR+IoT access study (2.0 s / 5.63 s)](https://www.researchgate.net/publication/353623733_Residential_access_control_system_using_QR_code_and_the_IoT).
 
 ## Run (Docker)
 
@@ -98,7 +152,7 @@ historical access log is preserved). See
 ├── docs/                        # design notes
 ├── reefy/                       # canonical app spec (version, icon) for the
 │                                #  Reefy app catalog
-└── Dockerfile                   # CUDA 12.9 + GPU deps
+└── Dockerfile                   # cudnn-runtime CUDA 12.9 base + GPU deps
 ```
 
 ## Development
