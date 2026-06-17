@@ -23,20 +23,26 @@ WORKDIR /app
 # Devices then pull a few hundred kB instead of the full ~6.7 GB
 # torch/tensorrt blob each time.
 
-# Heavyweight + stable: torch + tensorrt are the bulk of the image.
+# Heavyweight: torch is the bulk of the image (qrdet/PyTorch cpu detector).
 RUN pip3 install --break-system-packages --no-cache-dir \
-    torch \
-    tensorrt
+    torch
 
-# ML pipeline (mid-weight, changes occasionally).
-# openvino drives the Intel-iGPU detector backend; onnx/onnxslim are
-# needed by ultralytics to export the TensorRT engine (gpu backend, built
-# on first run per device). See pipeline.py / docs/decode-backends.md.
+# ML pipeline. Detector backends (see pipeline.py):
+#   cpu  -> qrdet / PyTorch
+#   igpu -> ultralytics OpenVINO (Intel iGPU)
+#   gpu  -> ONNX via onnxruntime-gpu (CUDA EP)
+# The gpu path runs an ONNX model through onnxruntime-gpu (~3 ms detect, on
+# par with a TensorRT engine) instead of ultralytics' TensorRT engine
+# export - whose dep chain (modelopt / onnx-graphsurgeon / ...) grows across
+# versions and breaks the build unattended. ONNX export (onnx+onnxslim) and
+# onnxruntime are stable, so these deps can float; the perf-regression gate
+# (tools/run_perf_regression.py) guards against any drift.
 RUN pip3 install --break-system-packages --no-cache-dir \
     ultralytics \
     openvino \
     onnx \
     onnxslim \
+    onnxruntime-gpu \
     opencv-python-headless \
     numpy
 

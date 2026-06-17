@@ -15,7 +15,7 @@ back to host for the CPU-only QR-decode libraries.
 |---|---|---|---|
 | `cpu`  | cv2 software | qrdet YOLOv8 / PyTorch-CPU | no accelerator |
 | `igpu` | VAAPI        | qrdet YOLOv8 / OpenVINO    | Intel/AMD iGPU (`/dev/dri`, no CUDA) |
-| `gpu`  | NVDEC        | qrdet YOLOv8 / TensorRT    | NVIDIA GPU (CUDA) |
+| `gpu`  | NVDEC        | qrdet YOLOv8 / ONNX Runtime (CUDA EP) | NVIDIA GPU (CUDA) |
 
 Auto-selected at startup (`pipeline.detect_pipeline_backend`); override with
 `PIPELINE_BACKEND=cpu|igpu|gpu|auto`. Any hardware path degrades cleanly to
@@ -30,8 +30,16 @@ caches it in `$MODEL_CACHE` (`/models`, a persistent volume):
 
 - **OpenVINO IR** (igpu) - portable; can be baked at build via
   `tools/export_models.py --backend openvino`.
-- **TensorRT engine** (gpu) - GPU-arch specific, built on first run per
-  device (needs onnx/onnxslim, in the image).
+- **ONNX** (gpu) - portable; run through `onnxruntime-gpu` on the CUDA
+  execution provider (~3 ms detect, on par with a TensorRT engine).
+
+We deliberately do **not** use ultralytics' TensorRT *engine* export: its
+dependency footprint grows across versions (modelopt, onnx-graphsurgeon,
+onnxruntime, ...) and would break the build unattended or silently degrade
+the gpu backend to PyTorch-CUDA. ONNX export (onnx+onnxslim) and onnxruntime
+are stable, so the ML deps are unpinned and the perf-regression gate guards
+against drift. (ORT also exposes a TensorRT EP if an engine is ever wanted -
+it builds it internally, still without the ultralytics export chain.)
 
 An **accuracy gate** confirmed the exported models detect+decode the same
 token as PyTorch (see the de-risk in the measurements below).

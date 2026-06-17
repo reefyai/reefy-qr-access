@@ -26,7 +26,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 BASELINE_DIR = REPO / 'tests' / 'e2e' / 'baselines'
-IMAGE = 'ghcr.io/reefyai/reefy-qr-access:v2026.06.16-00'
+IMAGE = 'ghcr.io/reefyai/reefy-qr-access:v2026.06.17-00'
 
 # Per hardware class: the docker args granting the accelerator, the
 # (backend, env-prefix) configs to measure, and the baseline file.
@@ -71,8 +71,11 @@ def run_bench(box, ssh_target, backend, env_prefix, res, seconds):
     cfg = BOX_DEFS[box]
     inner = (f"{env_prefix} python3 tests/e2e/pipeline_bench.py "
              f"--backend {backend} --res {res} --seconds {seconds}")
+    # Mount a host model cache so the OpenVINO/TensorRT export happens once
+    # per box, not once per config (the engine build is ~1 min).
     docker = (f"sudo docker run --rm --network host {cfg['gpu_args']} "
-              f"-e MODEL_CACHE=/models {IMAGE} bash -lc '{inner}'")
+              f"-v /tmp/perf-models:/models -e MODEL_CACHE=/models "
+              f"{IMAGE} bash -lc '{inner}'")
     out = subprocess.run(
         ['ssh', '-o', 'ConnectTimeout=15', ssh_target, docker],
         capture_output=True, text=True, timeout=seconds + 240)

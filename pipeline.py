@@ -120,6 +120,7 @@ def ensure_export(model_size, fmt):
     GPU-arch specific and must be built on the target device."""
     cache = _model_cache()
     name = {'openvino': f'qrdet-{model_size}_openvino_model',
+            'onnx': f'qrdet-{model_size}.onnx',
             'engine': f'qrdet-{model_size}.engine'}[fmt]
     out = cache / name
     if out.exists():
@@ -153,8 +154,12 @@ def build_detector(pipeline_backend, model_size):
                   f"{e}); falling back to PyTorch-CPU")
     elif pipeline_backend == 'gpu':
         try:
-            eng = ensure_export(model_size, 'engine')
-            return (UltralyticsDetector(eng, 0, 'TensorRT',
+            # ONNX + onnxruntime-gpu (CUDA EP) - ~3 ms detect, on par with a
+            # TensorRT engine but without ultralytics' growing engine-export
+            # dep chain (modelopt/graphsurgeon/...). ONNX export is stable
+            # (onnx+onnxslim), so this stays upgrade-friendly.
+            onnx = ensure_export(model_size, 'onnx')
+            return (UltralyticsDetector(onnx, 0, 'ONNX Runtime (CUDA)',
                                         'NVIDIA GPU'), 'gpu')
         except Exception as e:
             print(f"[WARN] gpu detector unavailable ({type(e).__name__}: "
