@@ -1,4 +1,8 @@
-FROM nvidia/cuda:12.9.0-devel-ubuntu24.04
+# -base (not -devel/-runtime): we don't compile CUDA, and torch + onnxruntime
+# bring their own cuDNN/cuBLAS/CUDA-runtime via pip (nvidia-* wheels), so the
+# base image's system CUDA libs are redundant. The GPU driver comes from the
+# container runtime (CDI). See docs/gpu-pipeline.md.
+FROM nvidia/cuda:12.9.0-base-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
