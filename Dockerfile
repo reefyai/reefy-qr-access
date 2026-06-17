@@ -1,8 +1,10 @@
-# -base (not -devel/-runtime): we don't compile CUDA, and torch + onnxruntime
-# bring their own cuDNN/cuBLAS/CUDA-runtime via pip (nvidia-* wheels), so the
-# base image's system CUDA libs are redundant. The GPU driver comes from the
-# container runtime (CDI). See docs/gpu-pipeline.md.
-FROM nvidia/cuda:12.9.0-base-ubuntu24.04
+# cudnn-runtime (not -devel): we don't compile CUDA, so -devel's toolkit/nvcc
+# is dead weight. But onnxruntime's CUDA EP (gpu detector) needs a *system*
+# CUDA 12 + cuDNN 9 - torch's pip CUDA-13 libs don't satisfy it - so we can't
+# go all the way to -base. cudnn-runtime provides CUDA 12.9 + cuDNN 9 without
+# the toolkit. GPU driver comes from the container runtime (CDI).
+# See docs/gpu-pipeline.md.
+FROM nvidia/cuda:12.9.0-cudnn-runtime-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
