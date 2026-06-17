@@ -1523,6 +1523,7 @@ class DoorConfig:
         self.door_opens = 0
         self.denied_count = 0
         self._last_processed_frame = 0
+        self._last_processed_time = 0.0  # for time-based fps throttle
         # Per-door median-stacking decoder (recovers hard-to-read QRs from
         # recent frames). One per door so concurrent doors don't pollute
         # each other's stacks; it also resets between visitors so one
@@ -1580,9 +1581,14 @@ def list_live_doors():
 # DoorConfig.open_seconds and the per-token check below.
 
 
-def run_multi_door(doors, detector, decode_fn, conf=0.3, skip=1,
+def run_multi_door(doors, detector, decode_fn, conf=0.3, target_fps=5.0,
                    video_logger=None):
-    """Main loop: process all doors, sharing the detector for YOLO."""
+    """Main loop: process all doors, sharing the detector for YOLO.
+
+    Detection is throttled to `target_fps` per door using a time-based gate
+    (independent of the camera's stream fps; naturally capped by detector
+    throughput on slow hosts). target_fps<=0 means every frame."""
+    min_interval = (1.0 / target_fps) if target_fps and target_fps > 0 else 0.0
     global _running, _camera_readers
 
     # Stop any leftover camera readers from previous run
@@ -1618,7 +1624,8 @@ def run_multi_door(doors, detector, decode_fn, conf=0.3, skip=1,
     total_processed = 0
     interval_processed = 0  # frames since last status print
 
-    print(f"\n[INFO] Processing {len(doors)} door(s) (skip={skip}, conf={conf})")
+    print(f"\n[INFO] Processing {len(doors)} door(s) "
+          f"(target_fps={target_fps}, conf={conf})")
     print(f"[INFO] Press Ctrl+C to stop\n")
 
     while _running:
@@ -1630,11 +1637,16 @@ def run_multi_door(doors, detector, decode_fn, conf=0.3, skip=1,
                 continue
             if frame_count == door_cfg._last_processed_frame:
                 continue  # already processed this frame
-            if frame_count % skip != 0:
-                door_cfg._last_processed_frame = frame_count
+            # Throttle detection to target_fps (time-based -> independent of
+            # the camera's stream fps). Don't advance _last_processed_frame
+            # while throttled, so we pick up the newest frame once the
+            # interval elapses.
+            now_mono = time.monotonic()
+            if now_mono - door_cfg._last_processed_time < min_interval:
                 continue
 
             door_cfg._last_processed_frame = frame_count
+            door_cfg._last_processed_time = now_mono
             frame_lag = time.time() - capture_ts if capture_ts else 0
             any_frame = True
             total_processed += 1
@@ -1914,8 +1926,12 @@ def main():
     parser.add_argument('--token', action='append',
                         help='Valid token (repeatable, single-door mode)')
     # Shared args
-    parser.add_argument('--skip', type=int, default=3,
-                        help='Process every Nth frame (default: 3)')
+    parser.add_argument('--target-fps', type=float,
+                        default=float(os.environ.get('TARGET_FPS', '5')),
+                        help='Max detections/sec per door; env TARGET_FPS '
+                             'overrides. Time-based, so independent of the '
+                             'camera stream fps (capped by detector '
+                             'throughput). 0 = every frame. Default 5.')
     parser.add_argument('--model-size', default='auto',
                         choices=['auto', 'n', 's', 'm', 'l'],
                         help='YOLO model size; auto = n on CPU, s on GPU')
@@ -2094,7 +2110,7 @@ def main():
     print(f"[INFO] Video logs: {args.video_log_dir}")
 
     run_multi_door(doors, detector, decode_fn,
-                   conf=args.conf, skip=args.skip,
+                   conf=args.conf, target_fps=args.target_fps,
                    video_logger=video_logger)
 
 

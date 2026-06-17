@@ -104,7 +104,7 @@ def run_web(port, password):
             use_reloader=False, threaded=True)
 
 
-def run_detector(config_path, skip, conf, model_size, decode_backend,
+def run_detector(config_path, target_fps, conf, model_size, decode_backend,
                  pipeline_backend):
     """Start the QR detector/door opener. Restarts on reload_event."""
     import qr_live
@@ -127,7 +127,7 @@ def run_detector(config_path, skip, conf, model_size, decode_backend,
         sys.argv = [
             'qr_live.py',
             '--config', config_path,
-            '--skip', str(skip),
+            '--target-fps', str(target_fps),
             '--conf', str(conf),
             '--model-size', model_size,
             '--decode-backend', decode_backend,
@@ -157,8 +157,12 @@ def main():
                         help='Admin password (default: from QR_ADMIN_PASSWORD env)')
     parser.add_argument('--config', default='config/doors.yaml',
                         help='Door config YAML path (default: config/doors.yaml)')
-    parser.add_argument('--skip', type=int, default=3,
-                        help='Process every Nth frame (default: 3)')
+    parser.add_argument('--target-fps', type=float,
+                        default=float(os.environ.get('TARGET_FPS', '5')),
+                        help='Max detections/sec per door; env TARGET_FPS '
+                             'overrides. Time-based, independent of the '
+                             'camera stream fps (capped by detector '
+                             'throughput). 0 = every frame. Default 5.')
     parser.add_argument('--conf', type=float, default=0.3,
                         help='YOLO confidence threshold (default: 0.3)')
     parser.add_argument('--model-size', default=os.environ.get('MODEL_SIZE', 'auto'),
@@ -188,7 +192,7 @@ def main():
     print(f"[INFO] Auth:      {'enabled' if password else 'disabled'}")
     print(f"[INFO] Config:    {args.config}")
     if not args.web_only:
-        print(f"[INFO] Detector:  skip={args.skip}, conf={args.conf}, "
+        print(f"[INFO] Detector:  target_fps={args.target_fps}, conf={args.conf}, "
               f"model={args.model_size}, pipeline={args.pipeline_backend}, "
               f"decode={args.decode_backend}")
 
@@ -208,7 +212,7 @@ def main():
         # Give web UI a moment to start
         time.sleep(2)
         # Run detector in main thread (handles signals)
-        run_detector(args.config, args.skip, args.conf, args.model_size,
+        run_detector(args.config, args.target_fps, args.conf, args.model_size,
                      args.decode_backend, args.pipeline_backend)
 
 
