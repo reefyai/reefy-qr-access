@@ -2,11 +2,30 @@
   "machine": "nvidia-gpu",
   "host": "NVIDIA RTX 5060 Ti + AMD Ryzen 5 5600X",
   "note": "Full-pipeline (decode->detect->qr-decode) single-stream baselines measured by pipeline_bench.py. The hard gates are detect_ms and cpu_cores (see tolerance); fps is informational (test-capped). The cpu config is measured with CUDA_VISIBLE_DEVICES='' to force a true CPU run.",
-  "tolerance": {"detect_ms_pct": 30, "cpu_cores_pct": 25},
+  "tolerance": {
+    "detect_ms_pct": 30,
+    "cpu_cores_pct": 25
+  },
   "configs": {
-    "cpu@360p": {"detect_ms": 58.7, "cpu_cores": 4.79, "fps": 15.3},
-    "gpu@360p": {"detect_ms": 2.3,  "cpu_cores": 1.20, "fps": 119.0},
-    "cpu@720p": {"detect_ms": 65.4, "cpu_cores": 4.27, "fps": 13.1},
-    "gpu@720p": {"detect_ms": 3.6,  "cpu_cores": 1.35, "fps": 64.2}
+    "cpu@360p": {
+      "detect_ms": 63.4,
+      "cpu_cores": 4.5,
+      "fps": 14.2
+    },
+    "gpu@360p": {
+      "detect_ms": 3.9,
+      "cpu_cores": 1.17,
+      "fps": 101.9
+    },
+    "cpu@720p": {
+      "detect_ms": 68.0,
+      "cpu_cores": 4.18,
+      "fps": 12.7
+    },
+    "gpu@720p": {
+      "detect_ms": 4.4,
+      "cpu_cores": 1.32,
+      "fps": 67.8
+    }
   }
 }

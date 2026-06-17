@@ -2,11 +2,30 @@
   "machine": "intel-igpu",
   "host": "Intel Core i5-7260U (Kaby Lake iGPU)",
   "note": "Full-pipeline (decode->detect->qr-decode) single-stream baselines measured by pipeline_bench.py. The hard gates are detect_ms and cpu_cores (see tolerance); fps is informational (test-capped). detect_ms is ~resolution-independent (YOLO runs on a 640 input).",
-  "tolerance": {"detect_ms_pct": 30, "cpu_cores_pct": 25},
+  "tolerance": {
+    "detect_ms_pct": 30,
+    "cpu_cores_pct": 25
+  },
   "configs": {
-    "cpu@360p":  {"detect_ms": 327.6, "cpu_cores": 1.94, "fps": 2.9},
-    "igpu@360p": {"detect_ms": 58.9,  "cpu_cores": 1.91, "fps": 13.3},
-    "cpu@720p":  {"detect_ms": 319.3, "cpu_cores": 1.94, "fps": 2.9},
-    "igpu@720p": {"detect_ms": 61.8,  "cpu_cores": 1.85, "fps": 11.5}
+    "cpu@360p": {
+      "detect_ms": 126.8,
+      "cpu_cores": 2.5,
+      "fps": 7.4
+    },
+    "igpu@360p": {
+      "detect_ms": 26.4,
+      "cpu_cores": 1.06,
+      "fps": 28.2
+    },
+    "cpu@720p": {
+      "detect_ms": 143.7,
+      "cpu_cores": 2.35,
+      "fps": 6.3
+    },
+    "igpu@720p": {
+      "detect_ms": 27.5,
+      "cpu_cores": 1.15,
+      "fps": 22.7
+    }
   }
 }
