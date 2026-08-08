@@ -157,14 +157,15 @@ def check_shelly(door: dict) -> dict:
     opener = (door.get('opener_type') or 'shelly')
     if opener == 'onvif':
         uuid = (door.get('camera_uuid') or '').strip()
-        ip = next((c.get('ip') for c in db.get_cameras()
-                   if c.get('uuid') == uuid), None)
-        if not ip:
+        camera = next((candidate for candidate in db.get_cameras()
+                       if candidate.get('uuid') == uuid), None)
+        if not camera:
             return {'ok': False, 'configured': True,
                     'detail': 'camera IP not found (run Scan Network)'}
         from qr_live import onvif_relay_check
-        r = onvif_relay_check(ip, door.get('camera_user', ''),
-                              door.get('camera_pass', ''))
+        r = onvif_relay_check(
+            camera.get('ip', ''), door.get('camera_user', ''),
+            door.get('camera_pass', ''), device_url=camera.get('xaddr', ''))
         return {
             'ok': bool(r.get('ok')),
             'detail': 'OK' if r.get('ok') else (r.get('error') or 'unreachable'),

@@ -1,5 +1,5 @@
 // API helper
-async function api(url, method = 'GET', body = null) {
+async function api(url, method = 'GET', body = null, showErrors = true) {
     const opts = {
         method,
         headers: { 'Content-Type': 'application/json' },
@@ -7,7 +7,7 @@ async function api(url, method = 'GET', body = null) {
     if (body) opts.body = JSON.stringify(body);
 
     const res = await fetch(url, opts);
-    if (!res.ok) {
+    if (!res.ok && showErrors) {
         try {
             const err = await res.json();
             showError(err.error || 'Request failed');

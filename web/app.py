@@ -13,6 +13,7 @@ from .db import get_db
 from .qr_utils import create_token, generate_qr_png, get_qr_path
 from .config_export import export_config
 from .events import event_bus
+from .services.camera_validation import validate_camera
 # .discovery is imported lazily inside route handlers because it pulls in
 # cv2 + ONVIF stack, which we don't want loaded by lightweight callers (tests,
 # CLI helpers) that never hit a scan endpoint.
@@ -369,18 +370,43 @@ def api_camera_rtsp():
 @app.route('/api/doors', methods=['POST'])
 @login_required
 def api_create_door():
-    data = request.get_json()
+    data = request.get_json() or {}
     name = data.get('name', '').strip()
     if not name:
         return jsonify(error='Door name is required'), 400
 
+    camera_uuid = data.get('camera_uuid', '').strip()
+    if not camera_uuid:
+        return jsonify(error='Camera is required'), 400
+    camera = db.get_camera_by_uuid(camera_uuid)
+    if not camera:
+        return jsonify(
+            error='Selected camera is no longer available. Scan the network '
+                  'again and reselect it.'), 503
+
+    try:
+        camera_port = int(data.get('camera_port', 554))
+    except (TypeError, ValueError):
+        return jsonify(error='Camera port must be a number'), 400
+
+    camera_user = data.get('camera_user', 'admin').strip()
+    camera_pass = data.get('camera_pass', '')
+    camera_path = data.get('camera_path', '/stream2').strip() or '/stream2'
+    validation = validate_camera(
+        camera, camera_user, camera_pass, camera_path, camera_port)
+    if not validation['ok']:
+        print(f"[WARN] Door camera validation failed: "
+              f"{validation['error']}")
+        return jsonify(error=validation['error']), validation['status']
+    print("[INFO] Door camera validation succeeded")
+
     door_id = db.create_door(
         name=name,
-        camera_uuid=data.get('camera_uuid', ''),
-        camera_user=data.get('camera_user', 'admin'),
-        camera_pass=data.get('camera_pass', ''),
-        camera_path=data.get('camera_path', '/stream2'),
-        camera_port=int(data.get('camera_port', 554)),
+        camera_uuid=camera_uuid,
+        camera_user=camera_user,
+        camera_pass=camera_pass,
+        camera_path=camera_path,
+        camera_port=camera_port,
         shelly_device_id=data.get('shelly_device_id', ''),
         shelly_pass=data.get('shelly_pass', ''),
         open_seconds=int(data.get('open_seconds', 5)),

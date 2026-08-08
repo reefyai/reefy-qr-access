@@ -504,6 +504,16 @@ def get_cameras():
     return result
 
 
+def get_camera_by_uuid(camera_uuid):
+    """Return one discovered camera without exposing its stored RTSP list."""
+    db = get_db()
+    row = db.execute(
+        "SELECT id, ip, uuid, name, hardware, xaddr, last_seen "
+        "FROM cameras WHERE uuid=? LIMIT 1",
+        (camera_uuid,)).fetchone()
+    return dict(row) if row else None
+
+
 # --- Shelly helpers ---
 
 def upsert_shellys(shellys):

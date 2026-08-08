@@ -116,6 +116,10 @@ DETECTOR_INFO = {}
 # Resolved once in main() from --decode-backend / DECODE_BACKEND.
 VIDEO_DECODE_BACKEND = 'cpu'
 
+
+class CameraAuthenticationError(RuntimeError):
+    """ONVIF rejected saved camera credentials."""
+
 DEFAULT_CONFIG = {
     'doors': [{
         'name': 'Default Door',
@@ -447,7 +451,7 @@ class OnvifRelayController:
     """
 
     def __init__(self, name, ip, username='', password='', open_seconds=5,
-                 relay_token='auto'):
+                 relay_token='auto', device_url=''):
         self.name = name
         self.ip = ip
         self.username = username
@@ -455,7 +459,8 @@ class OnvifRelayController:
         self.open_seconds = open_seconds
         self.relay_token = None if (not relay_token or relay_token == 'auto') \
             else relay_token
-        self.dev_url = f"http://{ip}/onvif/device_service"
+        self.dev_url = (device_url.split()[0] if device_url
+                        else f"http://{ip}/onvif/device_service")
         self._last_open = 0
         self._cooldown = open_seconds  # re-fire allowed once the pulse ends (= beep length)
         self._lock = threading.Lock()
@@ -538,7 +543,8 @@ class OnvifRelayController:
             return f"error: {e}"
 
 
-def onvif_relay_check(ip, username='', password='', timeout=5):
+def onvif_relay_check(ip, username='', password='', timeout=5,
+                      device_url=''):
     """Reachability probe for an ONVIF camera relay (used by the door
     health monitor). Returns {'ok': bool, 'error': str|None}."""
     try:
@@ -546,7 +552,9 @@ def onvif_relay_check(ip, username='', password='', timeout=5):
         env = ('<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"'
                ' xmlns:tds="http://www.onvif.org/ver10/device/wsdl">'
                f'{auth}<soap:Body><tds:GetRelayOutputs/></soap:Body></soap:Envelope>')
-        r = requests.post(f"http://{ip}/onvif/device_service", data=env.encode(),
+        url = (device_url.split()[0] if device_url
+               else f"http://{ip}/onvif/device_service")
+        r = requests.post(url, data=env.encode(),
                           headers={'Content-Type': 'application/soap+xml'},
                           timeout=timeout)
         if r.status_code == 200 and 'RelayOutputs' in r.text:
@@ -954,12 +962,18 @@ def _discover_media_service(device_url, auth_header='', timeout=5):
     return []
 
 
-def fetch_onvif_rtsp_urls(ip, username='', password='', xaddr='', timeout=5):
+def fetch_onvif_rtsp_urls(ip, username='', password='', xaddr='', timeout=5,
+                          diagnostics=False):
     """Fetch RTSP stream URIs from an ONVIF camera via GetProfiles + GetStreamUri.
     Returns list of dicts with profile and url, or empty list on failure.
+    With diagnostics=True, returns (urls, failure_code) so callers can
+    distinguish rejected credentials from an unreachable camera.
     """
     import requests
     import re
+
+    def finish(urls, failure_code=None):
+        return (urls, failure_code) if diagnostics else urls
 
     from urllib.parse import urlparse
     if xaddr:
@@ -995,12 +1009,14 @@ def fetch_onvif_rtsp_urls(ip, username='', password='', xaddr='', timeout=5):
     resp = None
     used_url = None
     auth_failed = False
+    received_response = False
     for media_url in media_urls:
         try:
             print(f"[INFO] Trying ONVIF GetProfiles at {media_url}")
             resp = requests.post(media_url, data=get_profiles,
                                  headers={'Content-Type': 'application/soap+xml'},
                                  timeout=timeout)
+            received_response = True
             print(f"[INFO] ONVIF GetProfiles {media_url}: HTTP {resp.status_code}")
             if resp.status_code == 200 and 'token="' in resp.text and 'Profiles' in resp.text:
                 used_url = media_url
@@ -1024,17 +1040,23 @@ def fetch_onvif_rtsp_urls(ip, username='', password='', xaddr='', timeout=5):
                              or (subcode and 'authenticate' in subcode.lower())
                              or (subcode and 'sender' in subcode.lower() and 'unauthorized' in (reason or '').lower()))
             if is_auth_fault:
-                print(f"[WARN] auth failure - stopping retry to avoid "
-                      f"tripping camera's brute-force lockout")
+                print(f"[ERROR] ONVIF authentication rejected by the camera; "
+                      f"verify the camera username and password saved for "
+                      f"this door. Stopping endpoint retries to avoid "
+                      f"tripping the camera's brute-force lockout")
                 auth_failed = True
                 break
         except Exception as e:
             print(f"[WARN] ONVIF GetProfiles failed at {media_url}: {e}")
 
-    if not resp or not used_url:
+    if not used_url:
         if not auth_failed:
             print(f"[WARN] All ONVIF endpoints failed for {ip}")
-        return []
+        if auth_failed:
+            return finish([], 'auth')
+        if not received_response:
+            return finish([], 'unreachable')
+        return finish([], 'onvif')
 
     # Extract profile token + name pairs: <Profiles ... token="X"><Name>Y</Name>
     profile_pairs = re.findall(
@@ -1072,7 +1094,7 @@ def fetch_onvif_rtsp_urls(ip, username='', password='', xaddr='', timeout=5):
 
     if not profile_tokens:
         print(f"[WARN] No ONVIF profiles found for {ip}")
-        return []
+        return finish([], 'profiles')
 
     results = []
     for i, token in enumerate(profile_tokens):
@@ -1114,7 +1136,7 @@ def fetch_onvif_rtsp_urls(ip, username='', password='', xaddr='', timeout=5):
         except Exception as e:
             print(f"[WARN] GetStreamUri failed for {ip} profile {token}: {e}")
 
-    return results
+    return finish(results, None if results else 'stream_uri')
 
 
 def resolve_camera_address(camera_spec, discovered_cameras=None):
@@ -1170,10 +1192,14 @@ def resolve_camera_address(camera_spec, discovered_cameras=None):
     return None
 
 
-def _resolve_camera_ip(camera_spec):
-    """Re-discover camera IP by UUID via ONVIF. Returns IP or None."""
+def _resolve_camera_details(camera_spec):
+    """Re-discover a camera by UUID, preserving its ONVIF XAddr."""
     cameras = discover_onvif_cameras(timeout=3)
-    return resolve_camera_address(camera_spec, cameras)
+    ip = resolve_camera_address(camera_spec, cameras)
+    if not ip:
+        return None
+    return next((camera for camera in cameras if camera['ip'] == ip),
+                {'ip': ip, 'xaddr': ''})
 
 
 def _inject_rtsp_credentials(url, username, password):
@@ -1201,17 +1227,28 @@ def _inject_rtsp_credentials(url, username, password):
 
 def _fetch_onvif_session_url(camera_spec, username, password, profile='main'):
     """Fetch a fresh ONVIF session RTSP URL, re-discovering IP by UUID first."""
-    ip = _resolve_camera_ip(camera_spec)
-    if not ip:
+    camera = _resolve_camera_details(camera_spec)
+    if not camera:
         print(f"[WARN] Could not discover camera for '{camera_spec}'")
         return None
-    urls = fetch_onvif_rtsp_urls(ip, username=username, password=password)
+    ip = camera['ip']
+    urls, failure = fetch_onvif_rtsp_urls(
+        ip, username=username, password=password,
+        xaddr=camera.get('xaddr', ''), diagnostics=True)
+    if failure == 'auth':
+        raise CameraAuthenticationError(
+            'camera rejected the saved ONVIF username or password')
     if not urls:
         return None
     profile_lower = profile.lower()
+    profile_aliases = {
+        'main': ('main', 'primary'),
+        'sub': ('sub', 'minor', 'secondary'),
+    }.get(profile_lower, (profile_lower,))
     chosen = None
     for u in urls:
-        if profile_lower in u['profile'].lower():
+        label = u['profile'].lower()
+        if any(alias in label for alias in profile_aliases):
             chosen = u
             break
     if chosen is None:
@@ -1239,21 +1276,39 @@ def build_rtsp_url(camera_spec, door_def, discovered_cameras=None):
         passwd = door_def.get('camera_pass', '')
         path = door_def.get('camera_path', '/stream2')
         port = door_def.get('camera_port', 554)
+        builder = None
 
         # Special path: /onvif/main or /onvif/sub → fetch fresh session URL
         # Re-discovers camera IP by UUID on each call (handles IP changes)
         if path.startswith('/onvif/'):
             profile = path.split('/')[-1]  # 'main' or 'sub'
-            builder = lambda _spec=camera_spec, _u=user, _p=passwd, _pr=profile: \
-                _fetch_onvif_session_url(_spec, _u, _p, _pr)
-            session_url = builder()
+            auth_rejected = False
+
+            def builder(_spec=camera_spec, _u=user, _p=passwd, _pr=profile):
+                nonlocal auth_rejected
+                if auth_rejected:
+                    raise CameraAuthenticationError(
+                        'camera previously rejected the saved credentials')
+                try:
+                    return _fetch_onvif_session_url(_spec, _u, _p, _pr)
+                except CameraAuthenticationError:
+                    auth_rejected = True
+                    raise
+            try:
+                session_url = builder()
+            except CameraAuthenticationError:
+                print(f"[ERROR] Camera rejected the saved ONVIF credentials; "
+                      f"the reader will remain paused until configuration "
+                      f"changes")
+                session_url = None
             if session_url:
                 return session_url, builder
             print(f"[WARN] ONVIF session URL fetch failed, falling back to /stream2")
             path = '/stream2'
 
-        url = f"rtsp://{user}:{passwd}@{ip}:{port}{path}"
-        return resolve_mdns_in_url(url), None
+        url = _inject_rtsp_credentials(
+            f"rtsp://{ip}:{port}{path}", user, passwd)
+        return resolve_mdns_in_url(url), builder
 
     return resolve_mdns_in_url(camera_spec), None
 
@@ -1293,6 +1348,7 @@ def resolve_mdns_in_url(url):
 
 VIDEO_LOG_BUFFER_SECONDS = 5  # seconds of video before event
 VIDEO_LOG_AFTER_SECONDS = 3   # seconds of video after event
+CAMERA_RETRY_DELAYS_SECONDS = (2, 5, 10, 30, 60, 120, 300)
 # Thumbnail picked from this far back in the pre-buffer. 2s lands on
 # the person reaching the door instead of the QR-fills-frame moment.
 THUMBNAIL_LOOKBACK_S = 2.0
@@ -1310,6 +1366,7 @@ class CameraReader(threading.Thread):
         self._url_builder = url_builder
         self.name = name
         self._stopped = False
+        self._stop_event = threading.Event()
         self._frame = None
         self._frame_ts = 0  # timestamp when frame was captured
         self._lock = threading.Lock()
@@ -1323,19 +1380,40 @@ class CameraReader(threading.Thread):
 
     def run(self):
         global _running
+        retry_index = 0
         while _running and not self._stopped:
             # Refresh URL if we have a builder (e.g. ONVIF session URLs)
             if self._url_builder:
-                fresh = self._url_builder()
+                try:
+                    fresh = self._url_builder()
+                except CameraAuthenticationError:
+                    print(f"[ERROR] [{self.name}] Camera rejected the saved "
+                          f"ONVIF credentials. Automatic retries are paused "
+                          f"until the door configuration changes.")
+                    self._stop_event.wait()
+                    continue
                 if fresh:
                     self.url = fresh
             # Pick the decode backend (nvdec/vaapi/cpu); hardware paths
             # fall back to cpu cleanly inside open_reader.
-            reader = video_decode.open_reader(
-                self.url, VIDEO_DECODE_BACKEND, self.name)
+            try:
+                reader = video_decode.open_reader(
+                    self.url, VIDEO_DECODE_BACKEND, self.name)
+            except video_decode.StreamAuthenticationError:
+                print(f"[ERROR] [{self.name}] Camera rejected the saved RTSP "
+                      f"credentials. Automatic retries are paused until the "
+                      f"door configuration changes.")
+                self._stop_event.wait()
+                continue
             if reader is None:
-                print(f"[WARN] [{self.name}] Cannot open stream, retrying...")
-                time.sleep(2)
+                delay = CAMERA_RETRY_DELAYS_SECONDS[retry_index]
+                retry_index = min(
+                    retry_index + 1,
+                    len(CAMERA_RETRY_DELAYS_SECONDS) - 1)
+                print(f"[WARN] [{self.name}] Cannot open RTSP stream; "
+                      f"see the preceding probe error for the cause. "
+                      f"Retrying in {delay}s...")
+                self._stop_event.wait(delay)
                 continue
 
             self._w = reader.width
@@ -1346,9 +1424,16 @@ class CameraReader(threading.Thread):
             while _running and not self._stopped:
                 ret, frame = reader.read()
                 if not ret:
+                    delay = CAMERA_RETRY_DELAYS_SECONDS[retry_index]
+                    retry_index = min(
+                        retry_index + 1,
+                        len(CAMERA_RETRY_DELAYS_SECONDS) - 1)
                     print(f"[WARN] [{self.name}] Frame read failed, "
-                          f"reconnecting...")
+                          f"reconnecting in {delay}s...")
                     break
+                # A real frame proves the stream recovered. Future failures
+                # should retry promptly again.
+                retry_index = 0
                 now = time.time()
                 with self._lock:
                     self._frame = frame
@@ -1360,8 +1445,8 @@ class CameraReader(threading.Thread):
                             self._ring_buffer[-self._max_buffer:]
 
             reader.release()
-            if _running:
-                time.sleep(1)
+            if _running and not self._stopped:
+                self._stop_event.wait(delay)
 
     def get_frame(self):
         """Get the latest frame. Returns (frame, frame_count, capture_ts)
@@ -1377,6 +1462,7 @@ class CameraReader(threading.Thread):
     def stop(self):
         """Signal this reader to stop."""
         self._stopped = True
+        self._stop_event.set()
 
 
 class VideoLogger:
@@ -2024,12 +2110,16 @@ def main():
             cam_ip = resolve_camera_address(door_def['camera'],
                                             discovered_cameras)
             if cam_ip:
+                camera = next(
+                    (candidate for candidate in discovered_cameras
+                     if candidate['ip'] == cam_ip), {})
                 door_ctrl = OnvifRelayController(
                     name, cam_ip,
                     username=door_def.get('camera_user', ''),
                     password=door_def.get('camera_pass', ''),
                     open_seconds=open_seconds,
-                    relay_token=door_def.get('relay_token', 'auto'))
+                    relay_token=door_def.get('relay_token', 'auto'),
+                    device_url=camera.get('xaddr', ''))
                 print(f"[INFO] [{name}] Opener: ONVIF camera relay at "
                       f"{cam_ip} (relay={door_ctrl.relay_token or 'auto'})")
             else:

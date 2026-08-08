@@ -1112,7 +1112,9 @@ function showAddDoor() {
             <label>Open Duration (seconds)</label>
             <input type="number" name="open_seconds" value="5" min="1" max="30">
 
-            <button type="submit">Create Door</button>
+            <p id="door-create-error" role="alert"
+               style="display:none;color:#f87171;margin:0.8em 0;"></p>
+            <button type="submit" id="create-door-btn">Create Door</button>
         </form>
     `);
     _camRtspData = camRtspData;
@@ -1249,8 +1251,38 @@ async function scanInModal() {
 async function addDoor(form) {
     const data = {};
     new FormData(form).forEach((v, k) => data[k] = v);
-    const res = await api('/api/doors', 'POST', data);
-    if (res.ok) location.reload();
+    const btn = document.getElementById('create-door-btn');
+    const error = document.getElementById('door-create-error');
+    btn.disabled = true;
+    btn.textContent = 'Checking camera...';
+    error.style.display = 'none';
+    error.textContent = '';
+    try {
+        // Keep this modal open on validation errors. The global API helper's
+        // error modal would replace it and discard the entered credentials.
+        const res = await api('/api/doors', 'POST', data, false);
+        if (res.ok) {
+            location.reload();
+            return false;
+        }
+        let message = 'Camera validation failed. Check the settings and try again.';
+        try {
+            const result = await res.json();
+            message = result.error || message;
+        } catch (_) {}
+        error.textContent = message;
+        error.style.display = '';
+        if (res.status === 422) {
+            const password = form.querySelector('[name="camera_pass"]');
+            if (password) password.focus();
+        }
+    } catch (_) {
+        error.textContent = 'Could not reach QR Access. Try again.';
+        error.style.display = '';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Create Door';
+    }
     return false;
 }
 

@@ -33,6 +33,10 @@ import threading
 RENDER_NODE = '/dev/dri/renderD128'
 
 
+class StreamAuthenticationError(RuntimeError):
+    """The camera explicitly rejected RTSP credentials or permission."""
+
+
 # --- backend detection ------------------------------------------------
 
 def _nvdec_available():
@@ -74,10 +78,47 @@ def backend_label(backend):
 
 # --- stream probing ---------------------------------------------------
 
-def probe_stream(url, timeout=15):
-    """Return (width, height, fps) for an RTSP stream via ffprobe, or
-    (0, 0, 0.0) on failure. The ffmpeg-pipe reader needs the frame
-    geometry up front to slice fixed-size rawvideo frames off stdout."""
+def _probe_failure(stderr):
+    """Return a safe code and operator-facing reason for probe failure.
+
+    Never include ffprobe's raw stderr here. It can contain the complete
+    RTSP URL, including the camera username and password.
+    """
+    text = stderr.lower() if isinstance(stderr, str) else ''
+    if '401 unauthorized' in text or 'server returned 401' in text:
+        return ('auth',
+                'camera rejected RTSP authentication (HTTP 401); verify the '
+                'camera username and password saved for this door')
+    if '403 forbidden' in text or 'server returned 403' in text:
+        return ('forbidden',
+                'camera rejected RTSP access (HTTP 403); verify this account '
+                'has permission to view the selected stream')
+    if '404 not found' in text or 'server returned 404' in text:
+        return ('not_found',
+                'camera rejected the RTSP stream path (HTTP 404)')
+    if 'connection refused' in text:
+        return ('refused',
+                'RTSP connection refused; verify the camera address and port')
+    if 'timed out' in text or 'connection timeout' in text:
+        return ('timeout',
+                'RTSP connection timed out; verify camera reachability')
+    if 'no route to host' in text or 'network is unreachable' in text:
+        return ('unreachable',
+                'camera network is unreachable from this device')
+    return 'other', 'unclassified ffprobe error'
+
+
+def _probe_failure_reason(stderr):
+    """Backward-compatible reason-only helper used by tests and logs."""
+    return _probe_failure(stderr)[1]
+
+
+def probe_stream_diagnostic(url, timeout=15, name='camera'):
+    """Probe an RTSP stream and return width, height, fps, failure code.
+
+    The failure code is None on success. Raw ffprobe output is never returned
+    or logged because it can contain camera credentials.
+    """
     cmd = [
         'ffprobe', '-v', 'error',
         '-rtsp_transport', 'tcp',
@@ -89,16 +130,32 @@ def probe_stream(url, timeout=15):
         out = subprocess.run(cmd, capture_output=True, timeout=timeout,
                              text=True)
         if out.returncode != 0:
-            return 0, 0, 0.0
+            code, reason = _probe_failure(getattr(out, 'stderr', ''))
+            print(f"[WARN] [{name}] RTSP probe failed: {reason}")
+            return 0, 0, 0.0, code
         info = json.loads(out.stdout)['streams'][0]
         w = int(info.get('width') or 0)
         h = int(info.get('height') or 0)
         rate = info.get('r_frame_rate') or '0/1'
         num, _, den = rate.partition('/')
         fps = (float(num) / float(den)) if den and float(den) else 15.0
-        return w, h, (fps or 15.0)
+        return w, h, (fps or 15.0), None
+    except subprocess.TimeoutExpired:
+        reason = 'RTSP connection timed out; verify camera reachability'
+        print(f"[WARN] [{name}] RTSP probe failed: {reason}")
+        return 0, 0, 0.0, 'timeout'
     except Exception:
-        return 0, 0, 0.0
+        print(f"[WARN] [{name}] RTSP probe failed: unclassified ffprobe error")
+        return 0, 0, 0.0, 'other'
+
+
+def probe_stream(url, timeout=15, name='camera'):
+    """Return (width, height, fps) for an RTSP stream via ffprobe, or
+    (0, 0, 0.0) on failure. The ffmpeg-pipe reader needs the frame
+    geometry up front to slice fixed-size rawvideo frames off stdout."""
+    w, h, fps, _failure = probe_stream_diagnostic(
+        url, timeout=timeout, name=name)
+    return w, h, fps
 
 
 # --- ffmpeg-pipe hardware decoder -------------------------------------
@@ -120,7 +177,10 @@ class FFmpegReader:
         self._frame_bytes = 0
 
     def open(self):
-        self.width, self.height, self.fps = probe_stream(self.url)
+        self.width, self.height, self.fps, failure = probe_stream_diagnostic(
+            self.url, name=self.name)
+        if failure in ('auth', 'forbidden'):
+            raise StreamAuthenticationError(failure)
         if not (self.width and self.height):
             print(f"[WARN] [{self.name}] ffprobe failed; "
                   f"cannot start {self.backend} decode")
@@ -278,4 +338,12 @@ def open_reader(url, backend, name='camera'):
     if reader.open():
         _set_active('cpu' if backend == 'cpu' else backend)
         return reader
+    # OpenCV hides FFmpeg's useful stderr. Probe once after a failed CPU
+    # open so an explicit authentication rejection can stop automatic
+    # retries instead of incrementing the camera's lockout counter.
+    if backend == 'cpu':
+        _w, _h, _fps, failure = probe_stream_diagnostic(
+            url, timeout=10, name=name)
+        if failure in ('auth', 'forbidden'):
+            raise StreamAuthenticationError(failure)
     return None

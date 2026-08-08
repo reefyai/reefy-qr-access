@@ -19,7 +19,8 @@ def scan_shellys(timeout=5):
     return discover_shelly(timeout=timeout)
 
 
-def fetch_camera_rtsp(ip, username='', password='', xaddr=''):
+def fetch_camera_rtsp(ip, username='', password='', xaddr='',
+                      diagnostics=False):
     """Fetch RTSP URLs from a specific camera using ONVIF."""
     return fetch_onvif_rtsp_urls(ip, username=username, password=password,
-                                 xaddr=xaddr)
+                                 xaddr=xaddr, diagnostics=diagnostics)
