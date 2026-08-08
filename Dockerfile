@@ -105,6 +105,7 @@ COPY tools/ tools/
 RUN python3 -m unittest \
     tests.test_video_decode \
     tests.test_pipeline \
-    tests.test_perf_regression
+    tests.test_perf_regression \
+    tests.test_onvif_opener
 
 CMD ["python3", "run.py"]

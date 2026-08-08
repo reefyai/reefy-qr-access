@@ -1256,10 +1256,8 @@ def _fetch_onvif_session_url(camera_spec, username, password, profile='main'):
         chosen = urls[0]
         print(f"[INFO] No profile match for '{profile}', using first ({ip})")
     final = _inject_rtsp_credentials(chosen['url'], username, password)
-    # Mask the password in the log; the URL still appears in detector
-    # logs that may be shared.
-    safe = _inject_rtsp_credentials(chosen['url'], username, '***' if password else '')
-    print(f"[INFO] Got ONVIF session URL for '{profile}' ({ip}): {safe}")
+    print(f"[INFO] Got ONVIF session URL for '{profile}' ({ip}): "
+          f"{video_decode.redact_rtsp_urls(final)}")
     return final
 
 

@@ -154,6 +154,36 @@ class OnvifStreamDiscoveryTests(unittest.TestCase):
         self.assertIn('/stream1', url)
         self.assertEqual(fetch.call_args.kwargs['xaddr'], camera['xaddr'])
 
+    def test_session_fetch_log_redacts_credentials_and_query_token(self):
+        camera = {
+            'ip': '192.0.2.10',
+            'uuid': '00000000-0000-4000-8000-000000000001',
+            'name': 'Synthetic Camera',
+            'hardware': 'Test Model',
+            'xaddr': 'http://192.0.2.10/onvif/device_service',
+        }
+        streams = [{
+            'profile': 'mainStream',
+            'url': 'rtsp://192.0.2.10:554/stream1?session=private-token',
+        }]
+        spec = f"onvif:uuid:{camera['uuid']}"
+        with mock.patch.object(
+                qr_live, 'discover_onvif_cameras', return_value=[camera]), \
+             mock.patch.object(
+                qr_live, 'fetch_onvif_rtsp_urls',
+                return_value=(streams, None)), \
+             mock.patch('builtins.print') as printer:
+            url = qr_live._fetch_onvif_session_url(
+                spec, 'operator', 'secret-password', 'main')
+
+        self.assertIn('operator:secret-password@', url)
+        self.assertIn('session=private-token', url)
+        message = printer.call_args.args[0]
+        self.assertIn('rtsp://<redacted>', message)
+        self.assertNotIn('operator', message)
+        self.assertNotIn('secret-password', message)
+        self.assertNotIn('private-token', message)
+
     def test_session_fetch_maps_sub_profile_to_minor_stream(self):
         camera = {
             'ip': '192.0.2.10',
