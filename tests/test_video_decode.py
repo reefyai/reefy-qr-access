@@ -109,6 +109,62 @@ class TestAuthenticationStop(unittest.TestCase):
                 vd.open_reader('rtsp://x', 'cpu', 'test camera')
 
 
+class TestHardwareFirstFrame(unittest.TestCase):
+    @staticmethod
+    def _process(returncode=None):
+        proc = mock.Mock()
+        proc.poll.return_value = returncode
+        proc.stderr.readline.return_value = b''
+        return proc
+
+    def test_open_rejects_hardware_process_without_first_frame(self):
+        reader = vd.FFmpegReader('rtsp://x', 'vaapi', 'test camera')
+        proc = self._process(returncode=1)
+        with mock.patch.object(
+                vd, 'probe_stream_diagnostic',
+                return_value=(2, 1, 30.0, None)), \
+             mock.patch('subprocess.Popen', return_value=proc), \
+             mock.patch.object(reader, '_prefetch_first_frame',
+                               return_value=False):
+            self.assertFalse(reader.open())
+        proc.kill.assert_called_once()
+        self.assertIsNone(reader._proc)
+
+    def test_prefetched_frame_is_returned_by_first_read(self):
+        reader = vd.FFmpegReader('rtsp://x', 'vaapi', 'test camera')
+        reader.width = 2
+        reader.height = 1
+        reader._frame_bytes = 6
+        reader._proc = self._process()
+        first = bytes((1, 2, 3, 4, 5, 6))
+        with mock.patch.object(reader, '_read_exact', return_value=first):
+            self.assertTrue(reader._prefetch_first_frame(timeout=1))
+        array = mock.Mock()
+        array.reshape.return_value = 'first frame'
+        numpy = mock.Mock(uint8='uint8')
+        numpy.frombuffer.return_value = array
+        with mock.patch.dict(sys.modules, {'numpy': numpy}), \
+             mock.patch.object(reader, '_read_exact') as read_exact:
+            ok, frame = reader.read()
+        self.assertTrue(ok)
+        self.assertEqual(frame, 'first frame')
+        numpy.frombuffer.assert_called_once_with(first, 'uint8')
+        array.reshape.assert_called_once_with(1, 2, 3)
+        read_exact.assert_not_called()
+
+    def test_hardware_open_failure_falls_back_to_cpu(self):
+        hardware = mock.Mock()
+        hardware.open.return_value = False
+        cpu = mock.Mock()
+        cpu.open.return_value = True
+        with mock.patch.object(vd, 'FFmpegReader', return_value=hardware), \
+             mock.patch.object(vd, 'Cv2Reader', return_value=cpu):
+            opened = vd.open_reader(
+                'rtsp://x', 'vaapi', 'test camera')
+        self.assertIs(opened, cpu)
+        self.assertEqual(vd.get_active(), 'cpu (hw failed)')
+
+
 class TestBackendLabel(unittest.TestCase):
     def test_known_labels(self):
         self.assertIn('NVDEC', vd.backend_label('nvdec'))

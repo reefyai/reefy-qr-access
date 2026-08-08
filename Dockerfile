@@ -8,18 +8,31 @@ FROM nvidia/cuda:12.9.0-cudnn-runtime-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System deps for OpenCV, pyzbar.
-# ffmpeg/ffprobe (system build, VAAPI + NVDEC capable) drive the
-# hardware video-decode path; intel-media-va-driver + libva provide the
-# Intel iGPU VAAPI backend. See docs/decode-backends.md.
+# System deps for OpenCV, pyzbar, and repository setup. ffmpeg/ffprobe
+# (system build, VAAPI + NVDEC capable) drive the hardware video-decode path.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl gnupg \
     python3 python3-pip python3-dev \
     libzbar0 \
     libgl1 libglib2.0-0 \
     ffmpeg \
-    intel-media-va-driver libva2 libva-drm2 vainfo \
-    intel-opencl-icd \
     fonts-dejavu-core \
+    && install -d -m 0755 /usr/share/keyrings \
+    && curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key \
+        | gpg --dearmor -o /usr/share/keyrings/intel-graphics.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu noble client" \
+        > /etc/apt/sources.list.d/intel-gpu.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        intel-opencl-icd \
+        intel-media-va-driver-non-free \
+        libze-intel-gpu1 \
+        libze1 \
+        ocl-icd-libopencl1 \
+        libva2 \
+        libva-drm2 \
+        vainfo \
+        clinfo \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -80,5 +93,12 @@ COPY reefy/ reefy/
 # perf-regression gate runs inside the image. Small; no test deps installed.
 COPY tests/ tests/
 COPY tools/ tools/
+
+# Keep hardware selection and fallback regressions from reaching GHCR. These
+# tests mock cameras and accelerators, so they are deterministic during build.
+RUN python3 -m unittest \
+    tests.test_video_decode \
+    tests.test_pipeline \
+    tests.test_perf_regression
 
 CMD ["python3", "run.py"]

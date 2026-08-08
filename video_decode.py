@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
 import threading
 
 RENDER_NODE = '/dev/dri/renderD128'
+HARDWARE_FIRST_FRAME_TIMEOUT = 10.0
 
 
 class StreamAuthenticationError(RuntimeError):
@@ -175,6 +177,7 @@ class FFmpegReader:
         self.fps = 15.0
         self._proc = None
         self._frame_bytes = 0
+        self._prefetched_frame = None
 
     def open(self):
         self.width, self.height, self.fps, failure = probe_stream_diagnostic(
@@ -211,14 +214,19 @@ class FFmpegReader:
             return False
 
         # Drain stderr so a full pipe buffer never blocks ffmpeg.
-        threading.Thread(target=self._drain_stderr, daemon=True).start()
+        threading.Thread(
+            target=self._drain_stderr, args=(self._proc,), daemon=True
+        ).start()
+        if not self._prefetch_first_frame(HARDWARE_FIRST_FRAME_TIMEOUT):
+            self.release()
+            return False
         print(f"[INFO] [{self.name}] Stream opened ({self.backend}): "
               f"{self.width}x{self.height} @ {self.fps:.1f} FPS")
         return True
 
-    def _drain_stderr(self):
+    def _drain_stderr(self, proc):
         try:
-            for line in iter(self._proc.stderr.readline, b''):
+            for line in iter(proc.stderr.readline, b''):
                 msg = line.decode('utf-8', 'replace').strip()
                 if msg:
                     print(f"[WARN] [{self.name}] ffmpeg: {msg}")
@@ -236,12 +244,47 @@ class FFmpegReader:
             buf.extend(chunk)
         return buf
 
+    def _prefetch_first_frame(self, timeout):
+        """Prove FFmpeg can decode before reporting hardware success.
+
+        Reading a pipe is blocking, so perform the first read in a daemon
+        thread and bound the wait. ``release`` kills FFmpeg on timeout, which
+        unblocks the worker while the caller continues with CPU fallback.
+        """
+        result = queue.Queue(maxsize=1)
+
+        def read_frame():
+            try:
+                result.put(self._read_exact(self._frame_bytes))
+            except Exception:
+                result.put(None)
+
+        threading.Thread(target=read_frame, daemon=True).start()
+        try:
+            frame = result.get(timeout=timeout)
+        except queue.Empty:
+            print(f"[WARN] [{self.name}] {self.backend} produced no frame "
+                  f"within {timeout:.0f}s")
+            return False
+        if frame is None:
+            returncode = self._proc.poll() if self._proc is not None else None
+            detail = (f" (ffmpeg exit {returncode})"
+                      if returncode is not None else '')
+            print(f"[WARN] [{self.name}] {self.backend} failed before its "
+                  f"first frame{detail}")
+            return False
+        self._prefetched_frame = frame
+        return True
+
     def read(self):
         """Return (ok, frame_bgr). ok=False signals the caller to
         reconnect, matching cv2.VideoCapture.read() semantics."""
         if self._proc is None:
             return False, None
-        buf = self._read_exact(self._frame_bytes)
+        buf = self._prefetched_frame
+        self._prefetched_frame = None
+        if buf is None:
+            buf = self._read_exact(self._frame_bytes)
         if buf is None:
             return False, None
         import numpy as np
@@ -257,6 +300,7 @@ class FFmpegReader:
             except Exception:
                 pass
             self._proc = None
+        self._prefetched_frame = None
 
 
 # --- cv2 software reader (the proven CPU path, unchanged behaviour) ----

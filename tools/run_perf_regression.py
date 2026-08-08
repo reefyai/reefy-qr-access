@@ -8,9 +8,10 @@ prints the result table, and exits non-zero on any regression. This cannot
 run in GitHub CI - it needs real GPUs and synthetic camera streams - so it
 is a manual/pre-release gate.
 
-Hard gates per config: detect_ms and cpu_cores must stay within the
-baseline tolerance, and the synthetic QR token must decode (ok=true). fps
-is reported but not gated (it is test-capped/noisy).
+Hard gates per config: the requested detect/decode backends must actually
+engage, detect_ms and cpu_cores must stay within the baseline tolerance,
+and the synthetic QR token must decode (ok=true). fps is reported but not
+gated (it is test-capped/noisy).
 
 Usage:
     python3 tools/run_perf_regression.py [--seconds 12] [--update-baselines]
@@ -26,7 +27,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 BASELINE_DIR = REPO / 'tests' / 'e2e' / 'baselines'
-IMAGE = 'ghcr.io/reefyai/reefy-qr-access:v2026.06.17-03'
+IMAGE = 'ghcr.io/reefyai/reefy-qr-access:v2026.08.08-01'
 
 # Per hardware class: the docker args granting the accelerator, the
 # (backend, env-prefix) configs to measure, and the baseline file.
@@ -36,7 +37,7 @@ IMAGE = 'ghcr.io/reefyai/reefy-qr-access:v2026.06.17-03'
 # tools/perf-boxes.example.json) or the env var named in 'ssh_env'.
 BOX_DEFS = {
     'intel-igpu': {
-        'gpu_args': '--device /dev/dri:/dev/dri',
+        'gpu_args': '--device intel.com/gpu=all',
         'configs': [('cpu', ''), ('igpu', '')],
         'baseline': 'intel-igpu.json',
         'ssh_env': 'PERF_SSH_INTEL_IGPU',
@@ -87,9 +88,21 @@ def run_bench(box, ssh_target, backend, env_prefix, res, seconds):
 
 
 def check(measured, base, tol):
-    """True if measured is within tolerance of the baseline + decoded."""
+    """True when the requested pipeline really ran and met its baseline."""
     if not measured.get('ok'):
         return False, 'token not decoded'
+    expected = {
+        'cpu': ('cpu', 'cpu'),
+        'igpu': ('igpu', 'vaapi'),
+        'gpu': ('gpu', 'nvdec'),
+    }.get(measured.get('backend'))
+    if expected is None:
+        return False, f"unknown backend {measured.get('backend')!r}"
+    actual = (measured.get('pipeline'), measured.get('decode'))
+    if actual != expected:
+        return False, (f'backend fallback: pipeline={actual[0]!r}, '
+                       f'decode={actual[1]!r}; expected '
+                       f'pipeline={expected[0]!r}, decode={expected[1]!r}')
     dmax = base['detect_ms'] * (1 + tol['detect_ms_pct'] / 100)
     cmax = base['cpu_cores'] * (1 + tol['cpu_cores_pct'] / 100)
     if measured['detect_ms'] > dmax:
