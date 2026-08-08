@@ -27,7 +27,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 BASELINE_DIR = REPO / 'tests' / 'e2e' / 'baselines'
-IMAGE = 'ghcr.io/reefyai/reefy-qr-access:v2026.08.08-01'
+IMAGE = 'ghcr.io/reefyai/reefy-qr-access:v2026.08.08-02'
 
 # Per hardware class: the docker args granting the accelerator, the
 # (backend, env-prefix) configs to measure, and the baseline file.

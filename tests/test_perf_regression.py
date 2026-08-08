@@ -39,6 +39,15 @@ class TestBackendGate(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('backend fallback', reason)
 
+    def test_igpu_rejects_inference_only_cpu_fallback(self):
+        ok, reason = perf.check(
+            self.result('igpu', 'cpu', 'vaapi'),
+            self.base,
+            self.tolerance,
+        )
+        self.assertFalse(ok)
+        self.assertIn('backend fallback', reason)
+
     def test_gpu_requires_cuda_and_nvdec(self):
         ok, _ = perf.check(
             self.result('gpu', 'gpu', 'nvdec'), self.base, self.tolerance)

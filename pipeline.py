@@ -36,6 +36,29 @@ def _has_cuda():
         return False
 
 
+def _openvino_gpu_device():
+    """Return the exact OpenVINO GPU device name, or ``None``.
+
+    Ultralytics accepts ``intel:gpu`` even when no GPU is available and
+    silently substitutes CPU.  Check OpenVINO directly so callers get a
+    truthful backend result and the hardware regression gate cannot mistake
+    that substitution for accelerated inference.  Preserve an indexed name
+    such as ``GPU.0`` because passing generic ``GPU`` would make Ultralytics
+    choose AUTO when only indexed devices are exposed.
+    """
+    try:
+        from openvino import Core
+        devices = Core().available_devices
+    except Exception:
+        return None
+    if 'GPU' in devices:
+        return 'GPU'
+    if 'GPU.0' in devices:
+        return 'GPU.0'
+    return next((device for device in devices if device.startswith('GPU.')),
+                None)
+
+
 def detect_pipeline_backend(forced='auto'):
     """Resolve the pipeline backend. 'auto' picks gpu on NVIDIA, igpu on an
     Intel/AMD iGPU (render node present), else cpu. A forced value is
@@ -146,8 +169,12 @@ def build_detector(pipeline_backend, model_size):
     PyTorch-CPU on any failure. Returns (detector, actual_backend)."""
     if pipeline_backend == 'igpu':
         try:
+            ov_device = _openvino_gpu_device()
+            if ov_device is None:
+                raise RuntimeError('OpenVINO GPU device is unavailable')
             ov = ensure_export(model_size, 'openvino')
-            return (UltralyticsDetector(ov, 'intel:gpu', 'OpenVINO',
+            return (UltralyticsDetector(ov, f'intel:{ov_device.lower()}',
+                                        'OpenVINO',
                                         'Intel iGPU'), 'igpu')
         except Exception as e:
             print(f"[WARN] igpu detector unavailable ({type(e).__name__}: "
