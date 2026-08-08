@@ -1130,7 +1130,8 @@ def fetch_onvif_rtsp_urls(ip, username='', password='', xaddr='', timeout=5,
                 res = profile_resolutions.get(token, '')
                 label = f"{name} ({res})" if res else name
                 results.append({'profile': label, 'url': rtsp_url})
-                print(f"[INFO] Camera {ip} profile '{label}': {rtsp_url}")
+                print(f"[INFO] Camera {ip} profile '{label}': "
+                      f"{video_decode.redact_rtsp_urls(rtsp_url)}")
             else:
                 print(f"[WARN] No Uri found in GetStreamUri response for {token}")
         except Exception as e:
@@ -2147,7 +2148,8 @@ def main():
                       f"requested but none discovered)")
                 door_ctrl = None
 
-        print(f"[INFO] [{name}] Camera: {camera_url}")
+        print(f"[INFO] [{name}] Camera: "
+              f"{video_decode.redact_rtsp_urls(camera_url)}")
         print(f"[INFO] [{name}] Valid tokens: {len(valid_tokens)}")
 
         doors.append(DoorConfig(name, camera_url, door_ctrl, valid_tokens,

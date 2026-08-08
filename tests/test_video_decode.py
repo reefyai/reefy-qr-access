@@ -88,6 +88,11 @@ class TestProbeStream(unittest.TestCase):
     def test_garbage_output_returns_zeros(self):
         self.assertEqual(self._run('not json'), (0, 0, 0.0))
 
+    def test_rtsp_log_redaction_removes_userinfo_and_query_token(self):
+        message = vd.redact_rtsp_urls(
+            'open rtsp://admin:secret@camera.invalid/live?token=private')
+        self.assertEqual(message, 'open rtsp://<redacted>')
+
 
 class TestAuthenticationStop(unittest.TestCase):
     def test_hardware_probe_raises_on_rejected_credentials(self):
@@ -151,6 +156,30 @@ class TestHardwareFirstFrame(unittest.TestCase):
         numpy.frombuffer.assert_called_once_with(first, 'uint8')
         array.reshape.assert_called_once_with(1, 2, 3)
         read_exact.assert_not_called()
+
+    def test_first_frame_timeout_is_synchronous(self):
+        reader = vd.FFmpegReader('rtsp://x', 'vaapi', 'test camera')
+        reader._proc = self._process()
+        reader._proc.stdout = mock.Mock()
+        reader._frame_bytes = 6
+        with mock.patch('select.select', return_value=([], [], [])):
+            self.assertFalse(reader._prefetch_first_frame(timeout=0.01))
+
+    def test_ffmpeg_stderr_redacts_camera_url(self):
+        reader = vd.FFmpegReader('rtsp://x', 'vaapi', 'test camera')
+        proc = self._process()
+        proc.stderr.readline.side_effect = [
+            b'Error opening rtsp://admin:secret@camera.invalid/live\n',
+            b'',
+        ]
+        with mock.patch('builtins.print') as printer:
+            reader._drain_stderr(proc)
+        message = printer.call_args.args[0]
+        self.assertNotIn('admin', message)
+        self.assertNotIn('secret', message)
+        self.assertEqual(message,
+                         '[WARN] [test camera] ffmpeg: '
+                         'Error opening rtsp://<redacted>')
 
     def test_hardware_open_failure_falls_back_to_cpu(self):
         hardware = mock.Mock()

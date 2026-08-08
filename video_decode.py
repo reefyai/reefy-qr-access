@@ -27,16 +27,28 @@ from __future__ import annotations
 
 import json
 import os
-import queue
+import re
+import select
 import subprocess
 import threading
+import time
 
 RENDER_NODE = '/dev/dri/renderD128'
 HARDWARE_FIRST_FRAME_TIMEOUT = 10.0
+_RTSP_URL_RE = re.compile(r'(?i)\brtsps?://\S+')
 
 
 class StreamAuthenticationError(RuntimeError):
     """The camera explicitly rejected RTSP credentials or permission."""
+
+
+def redact_rtsp_urls(text):
+    """Remove complete RTSP URLs from log text.
+
+    Userinfo and camera-issued query tokens are both credentials, so keeping
+    only the scheme is safer than trying to redact username/password alone.
+    """
+    return _RTSP_URL_RE.sub('rtsp://<redacted>', str(text))
 
 
 # --- backend detection ------------------------------------------------
@@ -229,15 +241,32 @@ class FFmpegReader:
             for line in iter(proc.stderr.readline, b''):
                 msg = line.decode('utf-8', 'replace').strip()
                 if msg:
-                    print(f"[WARN] [{self.name}] ffmpeg: {msg}")
+                    print(f"[WARN] [{self.name}] ffmpeg: "
+                          f"{redact_rtsp_urls(msg)}")
         except Exception:
             pass
 
-    def _read_exact(self, n):
+    def _read_exact(self, n, timeout=None):
         """Read exactly n bytes off the pipe (one rawvideo frame), or
-        return None at EOF / on short read (ffmpeg died -> reconnect)."""
+        return None at EOF / on short read (ffmpeg died -> reconnect).
+
+        When timeout is set, wait for pipe readability only until that
+        deadline. The FFmpeg pipe is unbuffered, so select + read is safe and
+        avoids leaving a helper thread behind when hardware startup stalls.
+        """
+        if self._proc is None:
+            return None
+        deadline = time.monotonic() + timeout if timeout is not None else None
         buf = bytearray()
         while len(buf) < n:
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                readable, _, _ = select.select(
+                    [self._proc.stdout], [], [], remaining)
+                if not readable:
+                    raise TimeoutError
             chunk = self._proc.stdout.read(n - len(buf))
             if not chunk:
                 return None
@@ -247,25 +276,17 @@ class FFmpegReader:
     def _prefetch_first_frame(self, timeout):
         """Prove FFmpeg can decode before reporting hardware success.
 
-        Reading a pipe is blocking, so perform the first read in a daemon
-        thread and bound the wait. ``release`` kills FFmpeg on timeout, which
-        unblocks the worker while the caller continues with CPU fallback.
+        The first read has a real deadline. ``open`` kills and reaps FFmpeg on
+        failure before the caller continues with CPU fallback.
         """
-        result = queue.Queue(maxsize=1)
-
-        def read_frame():
-            try:
-                result.put(self._read_exact(self._frame_bytes))
-            except Exception:
-                result.put(None)
-
-        threading.Thread(target=read_frame, daemon=True).start()
         try:
-            frame = result.get(timeout=timeout)
-        except queue.Empty:
+            frame = self._read_exact(self._frame_bytes, timeout=timeout)
+        except TimeoutError:
             print(f"[WARN] [{self.name}] {self.backend} produced no frame "
                   f"within {timeout:.0f}s")
             return False
+        except Exception:
+            frame = None
         if frame is None:
             returncode = self._proc.poll() if self._proc is not None else None
             detail = (f" (ffmpeg exit {returncode})"

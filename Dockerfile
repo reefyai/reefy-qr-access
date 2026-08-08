@@ -8,6 +8,12 @@ FROM nvidia/cuda:12.9.0-cudnn-runtime-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+ARG INTEL_OPENCL_VERSION=24.39.31294.20-1032~24.04
+ARG INTEL_MEDIA_VERSION=24.3.4-1018~24.04
+ARG INTEL_LEVEL_ZERO_VERSION=24.39.31294.20-1032~24.04
+ARG LEVEL_ZERO_LOADER_VERSION=1.17.44.0-1022~24.04
+ARG LIBVA_VERSION=2.22.0.2-87~u24.04
+
 # System deps for OpenCV, pyzbar, and repository setup. ffmpeg/ffprobe
 # (system build, VAAPI + NVDEC capable) drive the hardware video-decode path.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -24,13 +30,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         > /etc/apt/sources.list.d/intel-gpu.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        intel-opencl-icd \
-        intel-media-va-driver-non-free \
-        libze-intel-gpu1 \
-        libze1 \
+        intel-opencl-icd=${INTEL_OPENCL_VERSION} \
+        intel-media-va-driver-non-free=${INTEL_MEDIA_VERSION} \
+        libze-intel-gpu1=${INTEL_LEVEL_ZERO_VERSION} \
+        libze1=${LEVEL_ZERO_LOADER_VERSION} \
         ocl-icd-libopencl1 \
-        libva2 \
-        libva-drm2 \
+        libva2=${LIBVA_VERSION} \
+        libva-drm2=${LIBVA_VERSION} \
         vainfo \
         clinfo \
     && rm -rf /var/lib/apt/lists/*
