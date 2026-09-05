@@ -793,81 +793,10 @@ def detect_qr_regions(det_type, det_model, frame, conf=0.3):
 
 
 def discover_onvif_cameras(timeout=3):
-    """Discover ONVIF cameras on the network via WS-Discovery.
-    Returns list of dicts with ip, uuid, name, hardware, xaddr.
-    """
-    import socket
-    import re
-    from urllib.parse import unquote
+    """Discover cameras through multicast and bounded LAN unicast probes."""
+    from onvif_discovery import discover_onvif_cameras as discover
+    return discover(timeout=timeout)
 
-    PROBE = ('<?xml version="1.0" encoding="utf-8"?>'
-             '<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"'
-             ' xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"'
-             ' xmlns:wsd="http://schemas.xmlsoap.org/ws/2005/04/discovery"'
-             ' xmlns:dn="http://www.onvif.org/ver10/network/wsdl">'
-             '<soap:Header>'
-             '<wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</wsa:Action>'
-             '<wsa:MessageID>urn:uuid:12345678-1234-1234-1234-123456789012</wsa:MessageID>'
-             '<wsa:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To>'
-             '</soap:Header>'
-             '<soap:Body><wsd:Probe>'
-             '<wsd:Types>dn:NetworkVideoTransmitter</wsd:Types>'
-             '</wsd:Probe></soap:Body></soap:Envelope>')
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    sock.settimeout(timeout)
-    sock.sendto(PROBE.encode(), ('239.255.255.250', 3702))
-
-    print(f"[INFO] Discovering ONVIF cameras ({timeout}s)...")
-    cameras = []
-    found_ips = set()
-    try:
-        while True:
-            data, addr = sock.recvfrom(65535)
-            ip = addr[0]
-            if ip in found_ips:
-                continue
-            found_ips.add(ip)
-
-            text = data.decode(errors='ignore')
-
-            # Extract UUID
-            uuid_match = re.search(r'Address>[^<]*(uuid:[^<]*)</', text)
-            uuid = uuid_match.group(1) if uuid_match else ''
-            # Normalize: strip 'uuid:' prefix for matching
-            uuid_bare = uuid.replace('uuid:', '').strip()
-
-            # Extract XAddrs
-            xaddr_match = re.search(r'XAddrs>(.*?)</', text)
-            xaddr = xaddr_match.group(1) if xaddr_match else ''
-
-            # Extract scopes
-            name = ''
-            hardware = ''
-            scopes_match = re.search(r'Scopes>(.*?)</', text)
-            if scopes_match:
-                for scope in scopes_match.group(1).split():
-                    if '/name/' in scope:
-                        name = unquote(scope.split('/name/')[-1])
-                    elif '/hardware/' in scope:
-                        hardware = unquote(scope.split('/hardware/')[-1])
-
-            cam = {
-                'ip': ip,
-                'uuid': uuid_bare,
-                'name': name,
-                'hardware': hardware,
-                'xaddr': xaddr,
-            }
-            cameras.append(cam)
-            print(f"[INFO] Found camera: {name} ({hardware}) "
-                  f"at {ip} uuid={uuid_bare}")
-    except socket.timeout:
-        pass
-    sock.close()
-
-    return cameras
 
 
 def _parse_soap_fault(text):
