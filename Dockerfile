@@ -92,7 +92,7 @@ ENV MODEL_CACHE=/models
 ENV PYTHONUNBUFFERED=1
 RUN mkdir -p /models
 
-COPY qr_live.py qr_tracks.py video_decode.py pipeline.py run.py ./
+COPY onvif_discovery.py qr_live.py qr_tracks.py video_decode.py pipeline.py run.py ./
 COPY web/ web/
 COPY reefy/ reefy/
 # tests/ carries the full-pipeline perf benchmark (pipeline_bench.py) the
@@ -106,6 +106,7 @@ RUN python3 -m unittest \
     tests.test_video_decode \
     tests.test_pipeline \
     tests.test_perf_regression \
-    tests.test_onvif_opener
+    tests.test_onvif_opener \
+    tests.test_onvif_discovery
 
 CMD ["python3", "run.py"]
