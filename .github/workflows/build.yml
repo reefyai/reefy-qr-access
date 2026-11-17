@@ -47,6 +47,10 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.image }}
             ghcr.io/reefyai/reefy-qr-access:latest
+          labels: |
+            org.opencontainers.image.version=${{ steps.meta.outputs.tag }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           provenance: false
           sbom: false
           # Registry-based cache: layers stored as :buildcache tag in the
