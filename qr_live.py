@@ -1320,8 +1320,20 @@ class CameraReader(threading.Thread):
                           f"until the door configuration changes.")
                     self._stop_event.wait()
                     continue
+                except (OSError, requests.RequestException) as exc:
+                    print(f"[WARN] [{self.name}] Camera resolution deferred "
+                          f"({type(exc).__name__})")
+                    fresh = None
                 if fresh:
                     self.url = fresh
+            if self._stopped or not _running or (_reload_event and _reload_event.is_set()):
+                break
+            if not self.url:
+                delay = CAMERA_RETRY_DELAYS_SECONDS[retry_index]
+                retry_index = min(retry_index + 1, len(CAMERA_RETRY_DELAYS_SECONDS) - 1)
+                print(f"[WARN] [{self.name}] Camera not discovered; retrying in {delay}s")
+                self._stop_event.wait(delay)
+                continue
             # Pick the decode backend (nvdec/vaapi/cpu); hardware paths
             # fall back to cpu cleanly inside open_reader.
             try:
@@ -1585,6 +1597,55 @@ def list_live_doors():
     """Return a list of (name, DoorConfig) for currently running doors."""
     with _LIVE_DOORS_LOCK:
         return list(_LIVE_DOORS.items())
+
+
+def unresolved_camera_builder(door_cfg, door_def, *, dry_run=False):
+    """Resolve a retained door in its reader thread, without blocking peers."""
+    refresh = None
+    resolved = False
+
+    def cancelled():
+        return (not _running or (_reload_event and _reload_event.is_set())
+                or (door_cfg.camera is not None and door_cfg.camera._stopped))
+
+    def build():
+        nonlocal refresh, resolved
+        if cancelled():
+            return None
+        if resolved:
+            return refresh() if refresh else door_cfg.camera_url
+        cameras = discover_onvif_cameras(timeout=3)
+        if cancelled():
+            return None
+        url, session_refresh = build_rtsp_url(door_def['camera'], door_def, cameras)
+        if not url or cancelled():
+            return None
+        # Preserve the existing authentication pause, including a sticky
+        # rejection recorded while building an ONVIF session URL.
+        if session_refresh:
+            url = session_refresh() or url
+        if cancelled():
+            return None
+        if not dry_run and door_def.get('opener', 'shelly') == 'onvif':
+            ip = resolve_camera_address(door_def['camera'], cameras)
+            camera = next(candidate for candidate in cameras if candidate['ip'] == ip)
+            controller = OnvifRelayController(
+                door_cfg.name, ip,
+                username=door_def.get('camera_user', ''),
+                password=door_def.get('camera_pass', ''),
+                open_seconds=door_cfg.open_seconds,
+                relay_token=door_def.get('relay_token', 'auto'),
+                device_url=camera.get('xaddr', ''))
+            if cancelled():
+                return None
+            door_cfg.door = controller
+        door_cfg.camera_url = url
+        refresh = session_refresh
+        resolved = True
+        print(f"[INFO] [{door_cfg.name}] Configured camera resolved; starting capture")
+        return url
+
+    return build
 
 
 # --- Main loop ---
@@ -1874,6 +1935,14 @@ def run_multi_door(doors, detector, decode_fn, conf=0.3, target_fps=5.0,
             except Exception:
                 pass
 
+    # Reload/shutdown must also wake readers waiting for initial discovery
+    # or paused after authentication rejection. Old generations cannot publish
+    # a late connection into the next detector run.
+    for reader in _camera_readers:
+        reader.stop()
+    with _LIVE_DOORS_LOCK:
+        _LIVE_DOORS.clear()
+
     elapsed = time.perf_counter() - t_start
     print(f"\n[DONE] {total_processed} frames in {elapsed:.1f}s "
           f"({total_processed/elapsed:.1f} FPS)")
@@ -2024,8 +2093,7 @@ def main():
         camera_url, url_builder = build_rtsp_url(door_def['camera'], door_def,
                                                  discovered_cameras)
         if not camera_url:
-            print(f"[ERROR] [{name}] Could not resolve camera, skipping")
-            continue
+            print(f"[WARN] [{name}] Camera unresolved; retaining door for background discovery")
         valid_tokens = set(door_def.get('tokens', []))
         open_seconds = door_def.get('open_seconds', 5)
         shelly_pass = door_def.get('shelly_pass', None)
@@ -2076,12 +2144,15 @@ def main():
                 door_ctrl = None
 
         print(f"[INFO] [{name}] Camera: "
-              f"{video_decode.redact_rtsp_urls(camera_url)}")
+              f"{video_decode.redact_rtsp_urls(camera_url) if camera_url else 'waiting for discovery'}")
         print(f"[INFO] [{name}] Valid tokens: {len(valid_tokens)}")
 
-        doors.append(DoorConfig(name, camera_url, door_ctrl, valid_tokens,
-                               url_builder=url_builder,
-                               open_seconds=open_seconds))
+        door_cfg = DoorConfig(name, camera_url, door_ctrl, valid_tokens,
+                              url_builder=url_builder, open_seconds=open_seconds)
+        if not camera_url:
+            door_cfg.url_builder = unresolved_camera_builder(
+                door_cfg, door_def, dry_run=args.dry_run)
+        doors.append(door_cfg)
 
     # Resolve 'auto' model size from the one GPU switch: nano on CPU-only
     # hosts (keeps up with the frame rate), small on GPU (full accuracy).
