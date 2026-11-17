@@ -107,6 +107,7 @@ RUN python3 -m unittest \
     tests.test_pipeline \
     tests.test_perf_regression \
     tests.test_onvif_opener \
-    tests.test_onvif_discovery
+    tests.test_onvif_discovery \
+    tests.test_camera_startup_retry
 
 CMD ["python3", "run.py"]

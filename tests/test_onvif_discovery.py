@@ -86,6 +86,24 @@ class DiscoveryTests(unittest.TestCase):
         payload = response().replace(b'<Envelope>', b'<Envelope xmlns="urn:example:discovery">')
         self.assertEqual(discovery._parse(payload, '10.20.30.9')[0]['hardware'], 'TestModel')
 
+    def test_retry_enumerates_newly_ready_camera_subnet(self):
+        def address(ip):
+            return SimpleNamespace(family=socket.AF_INET, address=ip, netmask='255.255.255.252')
+        mock_addrs = unittest.mock.Mock(side_effect=[
+            {'eth0': [address('10.20.31.1')]},
+            {'eth0': [address('10.20.31.1'), address('10.20.30.10')]}])
+        fake = SimpleNamespace(net_if_stats=lambda: {'eth0': SimpleNamespace(isup=True)}, net_if_addrs=mock_addrs)
+        first, second = FakeSocket(), FakeSocket()
+        with patch.dict(sys.modules, {'psutil': fake}), patch('builtins.open', mock_open(read_data='header\n')), patch.object(discovery.socket, 'socket', side_effect=[first, second]):
+            initial = discovery.discover_onvif_cameras()
+            retried = discovery.discover_onvif_cameras()
+        self.assertNotIn('synthetic-camera', [c['uuid'] for c in initial])
+        self.assertIn('synthetic-camera', [c['uuid'] for c in retried])
+        self.assertNotIn(('10.20.30.9', 3702), first.sent)
+        self.assertIn(('10.20.30.9', 3702), second.sent)
+        self.assertEqual(2, mock_addrs.call_count)
+        self.assertTrue(first.closed and second.closed)
+
     def test_unique_message_ids(self):
         self.assertNotEqual(discovery._probe(), discovery._probe())
 
